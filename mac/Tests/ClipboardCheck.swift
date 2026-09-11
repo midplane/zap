@@ -1,0 +1,38 @@
+import AppKit
+
+@main struct ClipboardCheck {
+    @MainActor static func main() throws {
+        let board = NSPasteboard.withUniqueName()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { board.releaseGlobally(); try? FileManager.default.removeItem(at: directory) }
+        let original = bitmap(width: 13, height: 7)
+        let png = original.representation(using: .png, properties: [:])!
+        let icon = bitmap(width: 2, height: 2).tiffRepresentation!
+        let file = directory.appendingPathComponent("image.png")
+        try png.write(to: file)
+
+        board.writeObjects([file as NSURL])
+        board.setData(icon, forType: .tiff)
+        precondition(pixels(NSImage(pasteboard: board)) == NSSize(width: 2, height: 2))
+        precondition(pixels(ClipboardImage.read(from: board)) == NSSize(width: 13, height: 7), "Captured Finder's icon instead of the image")
+
+        board.clearContents(); board.setData(png, forType: .png)
+        precondition(pixels(ClipboardImage.read(from: board)) == NSSize(width: 13, height: 7), "Direct PNG capture failed")
+        board.clearContents(); board.setData(original.tiffRepresentation!, forType: .tiff)
+        precondition(pixels(ClipboardImage.read(from: board)) == NSSize(width: 13, height: 7), "Direct TIFF capture failed")
+
+        let text = directory.appendingPathComponent("notes.txt")
+        try Data("Plain text".utf8).write(to: text)
+        board.clearContents(); board.writeObjects([text as NSURL]); board.setData(icon, forType: .tiff)
+        precondition(ClipboardImage.read(from: board) == nil, "Captured a non-image file's icon")
+        print("Finder image, direct PNG/TIFF, and non-image file checks passed")
+    }
+    static func bitmap(width: Int, height: Int) -> NSBitmapImageRep {
+        NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+    }
+    static func pixels(_ image: NSImage?) -> NSSize? {
+        guard let data = image?.tiffRepresentation, let bitmap = NSBitmapImageRep(data: data) else { return nil }
+        return NSSize(width: bitmap.pixelsWide, height: bitmap.pixelsHigh)
+    }
+}

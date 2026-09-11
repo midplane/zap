@@ -24,10 +24,13 @@ The Mac build script now bypasses the broken SwiftPM manifest linker on this mac
 (cd backend && npm run check && npm test)
 ./scripts/build-mac.sh
 ./scripts/check-mac-crypto.sh
+./scripts/check-mac-clipboard.sh
 (cd android && ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:lintDebug)
 ```
 
 Android lint warnings include available dependency upgrades, the annotation processor, backup configuration, and synchronous preference writes on IO threads. The advisory recheck is pending: internal-registry authentication and automatic approval review prevented completing it. Do not interpret passing builds as a clean dependency audit.
+
+Mac clipboard checks use a separate pasteboard to verify Finder image-file copying (the image rather than its file icon), direct PNG/TIFF data, and ignoring icons on non-image files. They require access to macOS pasteboard services.
 
 ## Not established
 

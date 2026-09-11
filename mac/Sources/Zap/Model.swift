@@ -63,7 +63,7 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
         do {
             let source = NSWorkspace.shared.frontmostApplication?.localizedName ?? "Mac"
             let now = Int64(Date().timeIntervalSince1970 * 1000)
-            if let image = NSImage(pasteboard: board), let tiff = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff) {
+            if let image = ClipboardImage.read(from: board), let tiff = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff) {
                 guard bitmap.pixelsWide * bitmap.pixelsHigh <= 40_000_000, let png = bitmap.representation(using: .png, properties: [:]), png.count <= 20 * 1024 * 1024 else { throw ZapError("Image is too large. Maximum: 20 MiB and 40 megapixels.") }
                 try add(Payload(kind: "image", png: png.base64EncodedString(), source: source, createdAt: now))
             } else if let text = board.string(forType: .string), !text.isEmpty {
