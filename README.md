@@ -25,6 +25,8 @@ cd android
 
 Install `android/app/build/outputs/apk/debug/app-debug.apk` on your phone. Keep the debug signing key if you want to update that installation without losing local data. For distribution, use your own Android release signing configuration and a Developer ID signature/notarization on Mac. Set `ZAP_SIGN_IDENTITY` for the Mac signing identity; the default is local ad-hoc signing.
 
+The Mac scripts compile directly with the active Xcode/Command Line Tools compiler and SDK, keeping the compiler cache in `mac/.build`. If a Command Line Tools upgrade left duplicate SwiftBridging module definitions, the scripts hide the duplicate with a local compiler overlay. System files are unchanged; SwiftPM is not required.
+
 ## Deploy and pair
 
 ```sh

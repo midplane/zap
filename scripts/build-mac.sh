@@ -1,12 +1,11 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-if [ "${ZAP_USE_PREBUILT:-0}" != "1" ]; then
-  swift build --package-path mac -c release
-fi
+mkdir -p mac/.build/release
+./scripts/swiftc.sh -O mac/Sources/Zap/*.swift -o mac/.build/release/Zap -lsqlite3
 app="dist/Zap.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-cp "${ZAP_BINARY:-mac/.build/release/Zap}" "$app/Contents/MacOS/Zap"
+cp mac/.build/release/Zap "$app/Contents/MacOS/Zap"
 cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
