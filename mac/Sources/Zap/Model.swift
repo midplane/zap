@@ -34,6 +34,7 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
     private var syncRequested = false
     private var retryAt = Date.distantPast
     private var retryDelay: TimeInterval = 2
+    private var syncRetry: Task<Void, Never>?
     var paste: (() -> Void)?
 
     init() throws {
@@ -51,7 +52,9 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
     var pendingCount: Int { clips.filter(\.pending).count }
     func start() {
         timer = Timer.scheduledTimer(withTimeInterval: 0.65, repeats: true) { [weak self] _ in guard let self else { return }; Task { @MainActor in self.capture() } }
-        syncTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in guard let self else { return }; Task { @MainActor in await self.sync() } }
+        timer?.tolerance = 0.15
+        syncTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in guard let self else { return }; Task { @MainActor in await self.sync() } }
+        syncTimer?.tolerance = 30
         Task { await sync(); connectSocket() }
     }
     func persist() throws { try VaultCrypto.saveSecret(JSONEncoder().encode(identity)) }
@@ -144,6 +147,7 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
         guard !syncing else { error = "Wait for the current sync to finish, then disconnect."; return }
         do {
             socketLoop?.cancel(); socketLoop = nil; socket?.cancel(with: .goingAway, reason: nil)
+            syncRetry?.cancel(); syncRetry = nil
             for var clip in clips { clip.pending = true; try store.save(clip) }
             for id in try store.deletions() { try store.deleted(id) }
             let keyId = UUID().uuidString
@@ -217,10 +221,11 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
                 if days == requestedDays { UserDefaults.standard.removeObject(forKey: "daysPending") }
             }
             let snapshot = try JSONDecoder().decode(Snapshot.self, from: await request("/v1/sync?cursor=\(cursor)"))
-            for entry in snapshot.keys where identity.keys[entry.keyId] == nil { identity.keys[entry.keyId] = try VaultCrypto.unwrap(entry.envelope, privateKey: identity.privateKey, keyId: entry.keyId) }
+            var identityChanged = identity.keyId != snapshot.keyId
+            for entry in snapshot.keys where identity.keys[entry.keyId] == nil { identity.keys[entry.keyId] = try VaultCrypto.unwrap(entry.envelope, privateKey: identity.privateKey, keyId: entry.keyId); identityChanged = true }
             guard let currentKey = identity.keys[snapshot.keyId], currentKey.count == 32, (1...365).contains(snapshot.days) else { throw ZapError("The server returned invalid sync settings.") }
-            identity.keyId = snapshot.keyId; try persist(); devices = snapshot.devices
-            if !UserDefaults.standard.bool(forKey: "daysPending") { days = snapshot.days; UserDefaults.standard.set(days, forKey: "days") }
+            identity.keyId = snapshot.keyId; if identityChanged { try persist() }; devices = snapshot.devices
+            if !UserDefaults.standard.bool(forKey: "daysPending"), days != snapshot.days { days = snapshot.days; UserDefaults.standard.set(days, forKey: "days") }
             if let items = snapshot.items {
                 let remoteIDs = Set(items.map(\.id))
                 for clip in clips where !clip.pending && !remoteIDs.contains(clip.id) { try store.remove(clip.id) }
@@ -245,24 +250,36 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
                 } catch let error as APIError where error.status == 410 { try store.remove(clip.id) }
             }
             try reload(); status = "Up to date"; error = nil; retryDelay = 2; retryAt = .distantPast
+            syncRetry?.cancel(); syncRetry = nil
         } catch {
             status = "Offline · will retry"; self.error = error.localizedDescription
-            retryAt = Date().addingTimeInterval(retryDelay); retryDelay = min(retryDelay * 2, 120)
+            let delay = retryDelay
+            retryAt = Date().addingTimeInterval(delay); retryDelay = min(delay * 2, 120)
+            syncRetry?.cancel()
+            syncRetry = Task { [weak self] in
+                do { try await Task.sleep(for: .seconds(delay)) } catch { return }
+                await self?.sync()
+            }
         }
     }
     func connectSocket() {
         guard connected, socketLoop == nil else { return }
         socketLoop = Task { [weak self] in
             guard let self else { return }
+            var delay: TimeInterval = 2
             while !Task.isCancelled {
+                var components = URLComponents(string: identity.url + "/v1/events")!
+                components.scheme = components.scheme == "https" ? "wss" : "ws"
+                var request = URLRequest(url: components.url!); request.setValue("Bearer \(identity.token)", forHTTPHeaderField: "Authorization")
+                let task = URLSession.shared.webSocketTask(with: request); socket = task; task.resume()
                 do {
-                    var components = URLComponents(string: identity.url + "/v1/events")!
-                    components.scheme = components.scheme == "https" ? "wss" : "ws"
-                    var request = URLRequest(url: components.url!); request.setValue("Bearer \(identity.token)", forHTTPHeaderField: "Authorization")
-                    let task = URLSession.shared.webSocketTask(with: request); socket = task; task.resume()
                     await sync(force: true)
-                    while !Task.isCancelled { _ = try await task.receive(); await sync(force: true) }
-                } catch { socket?.cancel(with: .goingAway, reason: nil); try? await Task.sleep(for: .seconds(5)) }
+                    while !Task.isCancelled { _ = try await task.receive(); delay = 2; await sync(force: true) }
+                } catch {
+                    task.cancel(with: .goingAway, reason: nil)
+                    do { try await Task.sleep(for: .seconds(delay)) } catch { return }
+                    delay = min(delay * 2, 120)
+                }
             }
         }
     }

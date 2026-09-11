@@ -23,8 +23,7 @@ class ZapApplication : Application() {
     val repository by lazy { Repository(this) }
     override fun onCreate() {
         super.onCreate()
-        val work = PeriodicWorkRequestBuilder<SyncWorker>(15, TimeUnit.MINUTES).setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()).build()
-        WorkManager.getInstance(this).enqueueUniquePeriodicWork("zap-refresh", ExistingPeriodicWorkPolicy.KEEP, work)
+        repository.updateBackgroundSync()
     }
 }
 class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
@@ -42,12 +41,16 @@ class Repository(private val context: Context) {
     private val dao = Room.databaseBuilder(context, HistoryDatabase::class.java, "history.sqlite").build().clips()
     private val directory = File(context.filesDir, "content").apply { mkdirs() }
     private val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
-    private val http = OkHttpClient.Builder().callTimeout(45, TimeUnit.SECONDS).pingInterval(30, TimeUnit.SECONDS).build()
+    private val http = OkHttpClient.Builder().callTimeout(45, TimeUnit.SECONDS).pingInterval(60, TimeUnit.SECONDS).build()
     private val mutex = Mutex()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val syncRequests = SyncRequests(scope) { sync() }
+    private val payloads = mutableMapOf<String, JSONObject>()
+    private var nextCacheCleanup = 0L
     private var socket: WebSocket? = null
     private var active = false
     private var reconnect: Job? = null
+    private var reconnectDelay = 2_000L
     private var cursor = -1L
     val clips = MutableStateFlow<List<Clip>>(emptyList())
     val days = MutableStateFlow(prefs.getInt("days", 10))
@@ -62,21 +65,41 @@ class Repository(private val context: Context) {
         temp.writeBytes(Crypto.seal(clip.payload.toString().toByteArray(), identity.localKey, clip.id))
         check(temp.renameTo(file)) { "Could not save history" }
         dao.save(StoredClip(clip.id, clip.createdAt, clip.pending))
+        payloads[clip.id] = clip.payload
     }
-    private suspend fun removeLocal(id: String) { dao.remove(id); File(directory, id).delete() }
+    private suspend fun removeLocal(id: String) { dao.remove(id); File(directory, id).delete(); payloads.remove(id) }
     private suspend fun refresh() {
-        File(context.cacheDir, "shared").listFiles()?.filter { System.currentTimeMillis() - it.lastModified() > 3_600_000 }?.forEach { it.delete() }
-        val cutoff = System.currentTimeMillis() - days.value * 86_400_000L
+        val now = System.currentTimeMillis()
+        if (now >= nextCacheCleanup) {
+            File(context.cacheDir, "shared").listFiles()?.filter { now - it.lastModified() > 3_600_000 }?.forEach { it.delete() }
+            nextCacheCleanup = now + 3_600_000
+        }
+        val cutoff = now - days.value * 86_400_000L
         val stored = dao.all()
         for (clip in stored.filter { it.createdAt <= cutoff }) removeLocal(clip.id)
-        clips.value = stored.filter { it.createdAt > cutoff }.map {
-            Clip(it.id, it.createdAt, JSONObject(String(Crypto.open(File(directory, it.id).readBytes(), identity.localKey, it.id))), it.pending)
+        val retained = stored.filter { it.createdAt > cutoff }
+        payloads.keys.retainAll(retained.map { it.id }.toSet())
+        clips.value = retained.map {
+            val payload = payloads.getOrPut(it.id) { JSONObject(String(Crypto.open(File(directory, it.id).readBytes(), identity.localKey, it.id))) }
+            Clip(it.id, it.createdAt, payload, it.pending)
+        }
+    }
+    fun updateBackgroundSync() {
+        val manager = WorkManager.getInstance(context)
+        if (identity.connected) {
+            val constraints = Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).setRequiresBatteryNotLow(true).build()
+            val work = PeriodicWorkRequestBuilder<SyncWorker>(15, TimeUnit.MINUTES).setConstraints(constraints).build()
+            manager.enqueueUniquePeriodicWork("zap-refresh", ExistingPeriodicWorkPolicy.UPDATE, work)
+        } else {
+            manager.cancelUniqueWork("zap-refresh")
+            manager.cancelUniqueWork("zap-send")
         }
     }
     fun enqueue() {
+        if (!identity.connected) return
         val work = OneTimeWorkRequestBuilder<SyncWorker>().setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()).setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 10, TimeUnit.SECONDS).build()
-        WorkManager.getInstance(context).enqueueUniqueWork("zap-send", ExistingWorkPolicy.APPEND_OR_REPLACE, work)
-        scope.launch { sync() }
+        WorkManager.getInstance(context).enqueueUniqueWork("zap-send", ExistingWorkPolicy.KEEP, work)
+        syncRequests.request()
     }
     suspend fun addText(text: String) = withContext(Dispatchers.IO) {
         require(text.isNotEmpty()) { "Clipboard is empty" }
@@ -159,7 +182,7 @@ class Repository(private val context: Context) {
             identity.state.put("url", url).put("token", result.getString("token")).put("deviceId", result.getString("deviceId")).put("keyId", keyId).put("keys", keys)
             identity.save(); connected.value = true; cursor = -1; error.value = null
         }
-        sync(); if (active) connectSocket()
+        updateBackgroundSync(); sync(); if (active) connectSocket()
     }
     suspend fun invite(): String = withContext(Dispatchers.IO) {
         sync()
@@ -179,6 +202,7 @@ class Repository(private val context: Context) {
             prefs.edit().remove("clearPending").putBoolean("daysPending", true).commit()
             status.value = "Local history"; error.value = null; refresh()
         }
+        updateBackgroundSync()
     }
     suspend fun removeDevice(deviceId: String) = withContext(Dispatchers.IO) {
         mutex.withLock {
@@ -198,12 +222,13 @@ class Repository(private val context: Context) {
                 if (prefs.getBoolean("daysPending", false)) { request("/v1/settings", "PUT", JSONObject().put("days", days.value).toString().toByteArray()); prefs.edit().remove("daysPending").commit() }
                 val state = JSONObject(String(request("/v1/sync?cursor=$cursor")))
                 val keys = state.getJSONArray("keys")
+                var identityChanged = identity.state.getString("keyId") != state.getString("keyId")
                 for (i in 0 until keys.length()) {
                     val entry = keys.getJSONObject(i); val id = entry.getString("keyId")
-                    if (!identity.keys.has(id)) identity.keys.put(id, Crypto.unwrap(entry.getJSONObject("envelope"), identity.state.getString("private").unb64(), id).b64())
+                    if (!identity.keys.has(id)) { identity.keys.put(id, Crypto.unwrap(entry.getJSONObject("envelope"), identity.state.getString("private").unb64(), id).b64()); identityChanged = true }
                 }
-                identity.state.put("keyId", state.getString("keyId")); identity.save()
-                days.value = state.getInt("days"); prefs.edit().putInt("days", days.value).commit()
+                identity.state.put("keyId", state.getString("keyId")); if (identityChanged) identity.save()
+                if (days.value != state.getInt("days")) { days.value = state.getInt("days"); prefs.edit().putInt("days", days.value).commit() }
                 val deviceList = state.getJSONArray("devices"); devices.value = (0 until deviceList.length()).map { deviceList.getJSONObject(it) }
                 if (!state.isNull("items")) {
                     val array = state.getJSONArray("items"); val items = (0 until array.length()).map { array.getJSONObject(it) }
@@ -230,24 +255,32 @@ class Repository(private val context: Context) {
             catch (e: Exception) { status.value = "Offline · will retry"; error.value = e.message ?: "Could not sync"; false }
         }
     }
-    fun foreground(value: Boolean) {
+    @Synchronized fun foreground(value: Boolean) {
         active = value
-        if (value) { scope.launch { sync() }; connectSocket() }
+        if (value) { reconnectDelay = 2_000; syncRequests.request(); connectSocket() }
         else { reconnect?.cancel(); socket?.close(1000, null); socket = null }
     }
-    private fun connectSocket() {
+    @Synchronized private fun connectSocket() {
         if (!active || !identity.connected || socket != null) return
         val request = Request.Builder().url(identity.state.getString("url") + "/v1/events").header("Authorization", "Bearer ${identity.state.getString("token")}").build()
         socket = http.newWebSocket(request, object : WebSocketListener() {
-            override fun onOpen(webSocket: WebSocket, response: Response) { scope.launch { sync() } }
-            override fun onMessage(webSocket: WebSocket, text: String) { scope.launch { sync() } }
+            override fun onOpen(webSocket: WebSocket, response: Response) { socketChanged(webSocket) }
+            override fun onMessage(webSocket: WebSocket, text: String) { socketChanged(webSocket) }
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) { retrySocket(webSocket) }
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) { retrySocket(webSocket) }
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) { webSocket.close(code, reason) }
         })
     }
-    private fun retrySocket(failed: WebSocket) {
+    @Synchronized private fun socketChanged(current: WebSocket) {
+        if (!active || socket !== current) return
+        reconnectDelay = 2_000
+        syncRequests.request()
+    }
+    @Synchronized private fun retrySocket(failed: WebSocket) {
         if (socket !== failed) return
-        socket = null; reconnect?.cancel(); reconnect = scope.launch { delay(5000); connectSocket() }
+        socket = null; reconnect?.cancel()
+        if (!active || !identity.connected) return
+        val wait = reconnectDelay; reconnectDelay = (wait * 2).coerceAtMost(120_000)
+        reconnect = scope.launch { delay(wait); connectSocket() }
     }
 }
