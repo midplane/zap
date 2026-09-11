@@ -10,8 +10,6 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -26,7 +24,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import androidx.lifecycle.lifecycleScope
@@ -128,14 +128,16 @@ class MainActivity : ComponentActivity() {
                     Spacer(Modifier.weight(1f))
                     IconButton(onClick = { runAction { repo.sync() } }) { Icon(Icons.Outlined.Sync, "Sync now") }
                 }
+                val pending = clips.count { it.pending }
+                Text(if (connected && pending > 0) "$pending waiting to sync" else status, Modifier.padding(start = 24.dp, end = 24.dp, bottom = 8.dp), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 val filtered = clips.filter { (filter == "All" || it.kind == if (filter == "Text") "text" else "image") && (search.isBlank() || it.text.contains(search, true) || it.source.contains(search, true)) }
                 if (filtered.isEmpty()) {
                     Column(Modifier.weight(1f).fillMaxWidth().padding(32.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
                         Icon(if (search.isEmpty()) Icons.Outlined.ContentPaste else Icons.Outlined.Search, null, Modifier.size(40.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                         Spacer(Modifier.height(20.dp))
-                        Text(if (search.isEmpty()) "Your clipboard, remembered" else "No matches", style = MaterialTheme.typography.titleLarge)
+                        Text(if (search.isNotEmpty()) "No matches" else if (filter == "All") "Your clipboard, remembered" else "No ${filter.lowercase()} yet", style = MaterialTheme.typography.titleLarge, textAlign = TextAlign.Center)
                         Spacer(Modifier.height(8.dp))
-                        Text(if (search.isEmpty()) "Share text or an image to Zap, or add what you’ve copied." else "Try another word or content filter.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(if (search.isEmpty()) "Share text or an image to Zap, or add what you’ve copied." else "Try another word or content filter.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
                         if (!connected) { Spacer(Modifier.height(20.dp)); TextButton(onClick = { settings = true }) { Text("Connect your Mac") } }
                     }
                 } else LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(bottom = 100.dp)) {
@@ -144,16 +146,15 @@ class MainActivity : ComponentActivity() {
                             headlineContent = { Text(if (clip.kind == "image") "Image" else clip.text, maxLines = 3, overflow = TextOverflow.Ellipsis) },
                             supportingContent = { Text("${clip.source} · ${relativeDate(clip.createdAt)}", maxLines = 1, overflow = TextOverflow.Ellipsis) },
                             leadingContent = {
-                                if (clip.kind == "image") AsyncImage(model = remember(clip.id) { clip.payload.getString("png").unb64() }, contentDescription = "Image preview", modifier = Modifier.size(48.dp))
+                                if (clip.kind == "image") ClipImage(clip, Modifier.size(48.dp))
                                 else Icon(Icons.Outlined.Notes, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
                             },
-                            trailingContent = { IconButton(onClick = { runAction { copyClip(context, clip); snackbar.showSnackbar("Copied") } }) { Icon(Icons.Outlined.ContentCopy, "Copy") } },
+                            trailingContent = { IconButton(onClick = { runAction { copyClip(context, clip); snackbar.showSnackbar("Copied") } }) { Icon(Icons.Outlined.ContentCopy, if (clip.kind == "image") "Copy image" else "Copy text") } },
                             modifier = Modifier.clickable { preview = clip }.padding(horizontal = 4.dp)
                         )
                         HorizontalDivider(Modifier.padding(start = 72.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
                     }
                 }
-                if (filtered.isEmpty()) Text(status, Modifier.padding(start = 24.dp, bottom = 100.dp), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
@@ -162,7 +163,7 @@ class MainActivity : ComponentActivity() {
             Column(Modifier.fillMaxWidth().padding(24.dp).navigationBarsPadding(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 Text(if (clip.kind == "image") "Image" else "Text", style = MaterialTheme.typography.titleLarge)
                 LazyColumn(Modifier.heightIn(max = 360.dp)) { item {
-                    if (clip.kind == "image") AsyncImage(remember(clip.id) { clip.payload.getString("png").unb64() }, "Clipboard image", Modifier.fillMaxWidth())
+                    if (clip.kind == "image") ClipImage(clip, Modifier.fillMaxWidth())
                     else SelectionContainer { Text(clip.text, style = MaterialTheme.typography.bodyLarge) }
                 } }
                 Text(DateFormat.getDateTimeInstance().format(Date(clip.createdAt)), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -236,8 +237,16 @@ class MainActivity : ComponentActivity() {
     }
     invitation?.let { code -> AlertDialog(onDismissRequest = { invitation = null }, title = { Text("Pair another device") }, text = { Text("Copy this private code and enter it in Zap on the new device. It expires in five minutes.") }, confirmButton = { TextButton(onClick = { context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Pairing code", code)); invitation = null }) { Text("Copy code") } }, dismissButton = { TextButton(onClick = { invitation = null }) { Text("Cancel") } }) }
     if (disconnecting) AlertDialog(onDismissRequest = { disconnecting = false }, title = { Text("Disconnect?") }, text = { Text("Local history stays on this phone and will upload when you connect again.") }, confirmButton = { TextButton(onClick = { disconnecting = false; onAction { repo.disconnect() } }) { Text("Disconnect") } }, dismissButton = { TextButton(onClick = { disconnecting = false }) { Text("Cancel") } })
-    if (clearing) AlertDialog(onDismissRequest = { clearing = false }, title = { Text("Clear history?") }, text = { Text("History will be deleted on all connected devices when they sync.") }, confirmButton = { TextButton(onClick = { clearing = false; onAction { repo.clear() } }) { Text("Clear history") } }, dismissButton = { TextButton(onClick = { clearing = false }) { Text("Cancel") } })
+    if (clearing) AlertDialog(onDismissRequest = { clearing = false }, title = { Text("Clear history?") }, text = { Text(if (connected) "History will be deleted on all connected devices when they sync." else "History will be deleted from this phone.") }, confirmButton = { TextButton(onClick = { clearing = false; onAction { repo.clear() } }) { Text("Clear history") } }, dismissButton = { TextButton(onClick = { clearing = false }) { Text("Cancel") } })
     remove?.let { id -> AlertDialog(onDismissRequest = { remove = null }, title = { Text("Remove this device?") }, text = { Text("It will no longer receive new items. Content already downloaded remains on that device.") }, confirmButton = { TextButton(onClick = { remove = null; onAction { repo.removeDevice(id) } }) { Text("Remove") } }, dismissButton = { TextButton(onClick = { remove = null }) { Text("Cancel") } }) }
+}
+
+@Composable private fun ClipImage(clip: Clip, modifier: Modifier) {
+    var data by remember(clip.id) { mutableStateOf<ByteArray?>(null) }
+    LaunchedEffect(clip.id) {
+        data = withContext(Dispatchers.IO) { clip.payload.getString("png").unb64() }
+    }
+    AsyncImage(data, "Clipboard image", modifier, contentScale = ContentScale.Fit)
 }
 
 private fun relativeDate(time: Long): String {

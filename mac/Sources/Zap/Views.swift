@@ -25,7 +25,7 @@ struct HistoryView: View {
                             Text("Search clipboard history").font(.title3).foregroundStyle(Color.zapSecondary).allowsHitTesting(false).accessibilityHidden(true)
                         }
                     }
-                Button { model.settingsOpen = true } label: { Image(systemName: "gearshape") }.buttonStyle(.plain).help("Settings").accessibilityLabel("Settings")
+                Button { model.settingsOpen = true } label: { Image(systemName: "gearshape").padding(6).contentShape(Rectangle()) }.buttonStyle(.plain).help("Settings").accessibilityLabel("Settings")
             }.padding(20)
             HStack {
                 Picker("Content", selection: $model.filter) { ForEach(["All", "Text", "Images"], id: \.self) { Text($0) } }.pickerStyle(.segmented).labelsHidden().frame(width: 220)
@@ -35,7 +35,7 @@ struct HistoryView: View {
             Divider()
             if model.filtered.isEmpty {
                 ContentUnavailableView {
-                    Label(model.query.isEmpty ? "Your clipboard, remembered" : "No matches", systemImage: model.query.isEmpty ? "clipboard" : "magnifyingglass")
+                    Label(model.query.isEmpty ? (model.filter == "All" ? "Your clipboard, remembered" : "No \(model.filter.lowercased()) yet") : "No matches", systemImage: model.query.isEmpty ? "clipboard" : "magnifyingglass")
                 } description: {
                     Text(model.query.isEmpty ? "Copy text or an image to get started.\nYour history stays here for \(model.days) days." : "Try another word or switch the content filter.")
                 }.frame(maxHeight: .infinity)
@@ -91,9 +91,9 @@ struct ClipRow: View {
             VStack(alignment: .leading, spacing: 5) {
                 Text(clip.payload.kind == "image" ? "Image" : clip.payload.text ?? "").font(.body).lineLimit(3).frame(maxWidth: .infinity, alignment: .leading)
                 HStack(spacing: 6) {
-                    Text(clip.payload.source)
+                    Text(clip.payload.source).lineLimit(1)
                     Text("·")
-                    Text(clip.date, style: .relative)
+                    Text(clip.date, format: .relative(presentation: .named, unitsStyle: .abbreviated)).lineLimit(1)
                     if clip.pending { Image(systemName: "arrow.triangle.2.circlepath").accessibilityLabel("Pending sync") }
                 }.font(.caption).foregroundStyle(selected ? Color.primary : Color.zapSecondary)
             }
@@ -131,6 +131,7 @@ struct SettingsView: View {
     @State private var joinCode = ""
     @State private var disconnecting = false
     @State private var clearing = false
+    @State private var removing: RemoteDevice?
     @State private var startup = SMAppService.mainApp.status == .enabled
     @State private var shortcut = UserDefaults.standard.string(forKey: "shortcut") ?? "option-c"
     var body: some View {
@@ -153,8 +154,9 @@ struct SettingsView: View {
                     if model.connected {
                         Text(model.identity.url).font(.caption).foregroundStyle(Color.zapSecondary).textSelection(.enabled)
                         ForEach(model.devices) { device in
-                            HStack { Label(device.name, systemImage: device.id == model.identity.deviceId ? "desktopcomputer" : "iphone"); Spacer()
-                                if device.id != model.identity.deviceId { Button("Remove", role: .destructive) { Task { await model.removeDevice(device) } } }
+                            HStack { Label(device.name, systemImage: device.id == model.identity.deviceId ? "desktopcomputer" : "laptopcomputer.and.iphone").lineLimit(1); Spacer()
+                                if device.id != model.identity.deviceId { Button("Remove", role: .destructive) { removing = device } }
+                                else { Text("This Mac").foregroundStyle(Color.zapSecondary).font(.caption) }
                             }
                         }
                         Button("Pair Android…") { Task { await model.invite() } }
@@ -171,23 +173,38 @@ struct SettingsView: View {
                     }
                 }
             }.formStyle(.grouped)
-            if let code = model.pairingCode {
-                HStack(spacing: 16) {
-                    if let image = qrImage(code) { Image(nsImage: image).interpolation(.none).resizable().frame(width: 190, height: 190).padding(8).background(.white).accessibilityLabel("Android pairing QR code") }
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Open Zap on Android").font(.headline)
-                        Text("Choose Scan pairing code.\nThis code expires in five minutes.").foregroundStyle(Color.zapSecondary)
-                        Button("Copy pairing code") {
-                            let board = NSPasteboard.general; board.clearContents(); board.setString(code, forType: .string)
-                            model.ignoreCurrentClipboard()
-                        }
+            if let error = model.error { Text(error).font(.caption).foregroundStyle(.red) }
+        }.padding(24).frame(width: 560, height: 570)
+        .sheet(isPresented: Binding(get: { model.pairingCode != nil }, set: { if !$0 { model.pairingCode = nil } })) {
+            if let code = model.pairingCode { PairingView(code: code, model: model) }
+        }
+        .alert("Remove this device?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }), presenting: removing) { device in
+            Button("Remove", role: .destructive) { Task { await model.removeDevice(device) } }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in Text("It will no longer receive new items. Content already downloaded remains on that device.") }
+        .confirmationDialog("Disconnect from this server? Local history stays on this Mac and will upload when you connect again.", isPresented: $disconnecting) { Button("Disconnect") { model.disconnect() } }
+        .confirmationDialog(model.connected ? "Clear history on all connected devices?" : "Clear history on this Mac?", isPresented: $clearing) { Button("Clear history", role: .destructive) { model.clear() } }
+    }
+}
+private struct PairingView: View {
+    let code: String
+    @ObservedObject var model: Model
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            HStack { Text("Pair your phone").font(.title2.weight(.semibold)); Spacer(); Button("Done") { model.pairingCode = nil }.keyboardShortcut(.cancelAction) }
+            HStack(spacing: 24) {
+                if let image = qrImage(code) { Image(nsImage: image).interpolation(.none).resizable().frame(width: 190, height: 190).padding(8).background(.white).accessibilityLabel("Android pairing QR code") }
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Open Zap on Android").font(.headline)
+                    Text("In Settings, choose Scan pairing code.").foregroundStyle(Color.zapSecondary)
+                    Text("This private code expires in five minutes.").font(.caption).foregroundStyle(Color.zapSecondary)
+                    Button("Copy pairing code") {
+                        let board = NSPasteboard.general; board.clearContents(); board.setString(code, forType: .string)
+                        model.ignoreCurrentClipboard()
                     }
                 }
             }
-            if let error = model.error { Text(error).font(.caption).foregroundStyle(.red) }
-        }.padding(24).frame(width: 560, height: model.pairingCode == nil ? 570 : 780)
-        .confirmationDialog("Disconnect from this server? Local history stays on this Mac and will upload when you connect again.", isPresented: $disconnecting) { Button("Disconnect") { model.disconnect() } }
-        .confirmationDialog("Clear history on all connected devices?", isPresented: $clearing) { Button("Clear history", role: .destructive) { model.clear() } }
+        }.padding(24).frame(width: 500)
     }
     func qrImage(_ text: String) -> NSImage? {
         let filter = CIFilter.qrCodeGenerator(); filter.message = Data(text.utf8); filter.correctionLevel = "L"
