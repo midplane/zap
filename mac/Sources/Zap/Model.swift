@@ -95,13 +95,13 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
         selection = list[max(0, min(list.count - 1, index + delta))].id
     }
     func delete(_ clip: Clip) {
-        do { try store.remove(clip.id, queue: true); try reload(); Task { await sync() } }
+        do { try store.remove(clip.id, queue: connected); try reload(); Task { await sync() } }
         catch { self.error = error.localizedDescription }
     }
     func clear() {
         do {
-            for clip in clips { try store.remove(clip.id, queue: true) }
-            UserDefaults.standard.set(true, forKey: "clearPending")
+            for clip in clips { try store.remove(clip.id, queue: connected) }
+            UserDefaults.standard.set(connected, forKey: "clearPending")
             try reload(); Task { await sync() }
         } catch { self.error = error.localizedDescription }
     }

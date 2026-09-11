@@ -115,12 +115,12 @@ class Repository(private val context: Context) {
         enqueue()
     }
     suspend fun delete(clip: Clip) = withContext(Dispatchers.IO) {
-        mutex.withLock { dao.queue(Deletion(clip.id)); removeLocal(clip.id); refresh() }; enqueue()
+        mutex.withLock { if (identity.connected) dao.queue(Deletion(clip.id)); removeLocal(clip.id); refresh() }; enqueue()
     }
     suspend fun clear() = withContext(Dispatchers.IO) {
         mutex.withLock {
-            prefs.edit().putBoolean("clearPending", true).commit()
-            for (clip in dao.all()) { dao.queue(Deletion(clip.id)); removeLocal(clip.id) }
+            prefs.edit().putBoolean("clearPending", identity.connected).commit()
+            for (clip in dao.all()) { if (identity.connected) dao.queue(Deletion(clip.id)); removeLocal(clip.id) }
             refresh()
         }; enqueue()
     }
