@@ -132,7 +132,8 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var url = ""
     @State private var token = ""
-    @State private var busy = false
+    @State private var connecting = false
+    @State private var joining = false
     @State private var joinCode = ""
     @State private var disconnecting = false
     @State private var clearing = false
@@ -164,18 +165,18 @@ struct SettingsView: View {
                                 else { Text("This Mac").foregroundStyle(Color.zapSecondary).font(.caption) }
                             }
                         }
-                        Button("Pair Android…") { Task { await model.invite() } }
+                        Button("Pair another device…") { Task { await model.invite() } }
                         Button("Sync now") { Task { await model.sync(force: true) } }
                         Button("Disconnect…") { disconnecting = true }
                     } else {
                         Text("For a new server, enter the URL and setup token from the deployment script. Already using Zap? Join your existing history below.").foregroundStyle(Color.zapSecondary)
                         TextField("Server URL", text: $url, prompt: Text("https://zap.your-account.workers.dev"))
                         SecureField("Setup token", text: $token)
-                        Button(busy ? "Connecting…" : "Set up new history") { busy = true; Task { await model.setup(url: url, token: token); busy = false; if model.connected { token = "" } } }.disabled(busy || url.isEmpty || token.isEmpty)
+                        Button(connecting ? "Connecting…" : "Set up new history") { connecting = true; Task { await model.setup(url: url, token: token); connecting = false; if model.connected { token = "" } } }.disabled(connecting || joining || url.isEmpty || token.isEmpty)
                         Divider()
-                        Text("On a connected phone, open Settings → Pair another device. Paste its code here.").foregroundStyle(Color.zapSecondary)
-                        SecureField("Pairing code from another device", text: $joinCode)
-                        Button("Join existing history") { busy = true; Task { await model.join(code: joinCode.trimmingCharacters(in: .whitespacesAndNewlines)); busy = false; if model.connected { joinCode = "" } } }.disabled(busy || joinCode.isEmpty)
+                        Text("On a Mac or phone that is already connected, open Settings, choose Pair another device, and paste its code below.").foregroundStyle(Color.zapSecondary)
+                        SecureField("Pairing code", text: $joinCode, prompt: Text("zap://pair#…"))
+                        Button(joining ? "Joining…" : "Join existing history") { joining = true; Task { await model.join(code: joinCode.trimmingCharacters(in: .whitespacesAndNewlines)); joining = false; if model.connected { joinCode = "" } } }.disabled(connecting || joining || joinCode.isEmpty)
                     }
                 }
             }.formStyle(.grouped)
@@ -188,7 +189,7 @@ struct SettingsView: View {
             Button("Remove", role: .destructive) { Task { await model.removeDevice(device) } }
             Button("Cancel", role: .cancel) {}
         } message: { _ in Text("It will no longer receive new items. Content already downloaded remains on that device.") }
-        .confirmationDialog("Disconnect from this server? Local history stays on this Mac and will upload when you connect again.", isPresented: $disconnecting) { Button("Disconnect") { model.disconnect() } }
+        .confirmationDialog("Disconnect from this server? This Mac's access is revoked. Local history stays here and will upload when you connect again.", isPresented: $disconnecting) { Button("Disconnect") { Task { await model.disconnect() } } }
         .confirmationDialog(model.connected ? "Clear history on all connected devices?" : "Clear history on this Mac?", isPresented: $clearing) { Button("Clear history", role: .destructive) { model.clear() } }
     }
 }
@@ -197,13 +198,13 @@ private struct PairingView: View {
     @ObservedObject var model: Model
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            HStack { Text("Pair your phone").font(.title2.weight(.semibold)); Spacer(); Button("Done") { model.pairingCode = nil }.keyboardShortcut(.cancelAction) }
+            HStack { Text("Pair another device").font(.title2.weight(.semibold)); Spacer(); Button("Done") { model.pairingCode = nil }.keyboardShortcut(.cancelAction) }
             HStack(spacing: 24) {
-                if let image = qrImage(code) { Image(nsImage: image).interpolation(.none).resizable().frame(width: 190, height: 190).padding(8).background(.white).accessibilityLabel("Android pairing QR code") }
+                if let image = qrImage(code) { Image(nsImage: image).interpolation(.none).resizable().frame(width: 190, height: 190).padding(8).background(.white).accessibilityLabel("Pairing QR code") }
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("Open Zap on Android").font(.headline)
-                    Text("In Settings, choose Scan pairing code.").foregroundStyle(Color.zapSecondary)
-                    Text("This private code expires in five minutes.").font(.caption).foregroundStyle(Color.zapSecondary)
+                    Text("Open Zap on the new device").font(.headline)
+                    Text("On Android, open Settings and scan this code. On a Mac, copy the code and paste it into Join existing history.").foregroundStyle(Color.zapSecondary)
+                    Text("Treat the code like a password. It expires in five minutes and works once.").font(.caption).foregroundStyle(Color.zapSecondary)
                     Button("Copy pairing code") {
                         let board = NSPasteboard.general; board.clearContents(); board.setString(code, forType: .string)
                         model.ignoreCurrentClipboard()

@@ -53,5 +53,14 @@ test("vault pairing, retries, deletion, expiry, and revocation", async () => {
     const racedState = await (await call("/v1/sync", "GET", mac.token)).json() as any;
     assert.equal(racedState.items.find((item: any) => item.id === raceID).size, downloaded.length);
     assert.deepEqual(downloaded, candidates.find(body => body.length === downloaded.length));
+    const rejoin = await (await call("/v1/invitations", "POST", mac.token)).json() as any;
+    const second = await (await call("/v1/pair", "POST", "", { ...registration, name: "Android 2", keyId: nextKey, token: rejoin.token })).json() as any;
+    assert.equal((await call("/v1/sync", "GET", second.token)).status, 200);
+    assert.equal((await call("/v1/devices/me", "DELETE", second.token)).status, 200);
+    assert.equal((await call("/v1/sync", "GET", second.token)).status, 401);
+    assert.equal(((await (await call("/v1/sync", "GET", mac.token)).json() as any).devices).length, 1);
+    assert.equal((await call("/v1/devices/me", "DELETE", mac.token)).status, 200);
+    assert.equal((await call("/v1/sync", "GET", mac.token)).status, 401);
+    assert.equal((await call("/v1/bootstrap", "POST", "test-setup", registration)).status, 200);
   } finally { await mf.dispose(); }
 });

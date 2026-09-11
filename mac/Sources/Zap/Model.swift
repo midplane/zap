@@ -32,6 +32,7 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
     private var socketLoop: Task<Void, Never>?
     private var changeCount = NSPasteboard.general.changeCount
     private var syncRequested = false
+    private var forceRequested = false
     private var retryAt = Date.distantPast
     private var retryDelay: TimeInterval = 2
     private var syncRetry: Task<Void, Never>?
@@ -63,18 +64,28 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
     func capture() {
         let board = NSPasteboard.general
         guard board.changeCount != changeCount else { return }; changeCount = board.changeCount
-        do {
-            let source = NSWorkspace.shared.frontmostApplication?.localizedName ?? "Mac"
-            let now = Int64(Date().timeIntervalSince1970 * 1000)
-            if let image = ClipboardImage.read(from: board), let tiff = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff) {
-                guard bitmap.pixelsWide * bitmap.pixelsHigh <= 40_000_000, let png = bitmap.representation(using: .png, properties: [:]), png.count <= 20 * 1024 * 1024 else { throw ZapError("Image is too large. Maximum: 20 MiB and 40 megapixels.") }
-                try add(Payload(kind: "image", png: png.base64EncodedString(), source: source, createdAt: now))
-            } else if let text = board.string(forType: .string), !text.isEmpty {
-                guard text.utf8.count <= 1024 * 1024 else { throw ZapError("Text is too large. Maximum: 1 MiB.") }
-                try add(Payload(kind: "text", text: text, source: source, createdAt: now))
-            }
-        } catch { self.error = error.localizedDescription }
+        let content = ClipboardContent.read(from: board)
+        let source = NSWorkspace.shared.frontmostApplication?.localizedName ?? "Mac"
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        Task.detached(priority: .userInitiated) { [weak self] in
+            do {
+                guard let payload = try Model.payload(from: content, source: source, createdAt: now) else { return }
+                try await self?.add(payload)
+            } catch { await self?.report(error) }
+        }
     }
+    nonisolated private static func payload(from content: ClipboardContent, source: String, createdAt: Int64) throws -> Payload? {
+        if let image = content.image, let tiff = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff) {
+            guard bitmap.pixelsWide * bitmap.pixelsHigh <= 40_000_000, let png = bitmap.representation(using: .png, properties: [:]), png.count <= 20 * 1024 * 1024 else { throw ZapError("Image is too large. Maximum: 20 MiB and 40 megapixels.") }
+            return Payload(kind: "image", png: png.base64EncodedString(), source: source, createdAt: createdAt)
+        }
+        guard let text = content.text, !text.isEmpty else { return nil }
+        // A pairing code carries the group keys. Moving one between devices should not file it in history.
+        guard !text.hasPrefix("zap://pair#") else { return nil }
+        guard text.utf8.count <= 1024 * 1024 else { throw ZapError("Text is too large. Maximum: 1 MiB.") }
+        return Payload(kind: "text", text: text, source: source, createdAt: createdAt)
+    }
+    private func report(_ error: Error) { self.error = error.localizedDescription }
     func add(_ payload: Payload) throws {
         if let previous = clips.first?.payload, previous.kind == payload.kind, previous.text == payload.text, previous.png == payload.png { return }
         let clip = Clip(id: UUID().uuidString, payload: payload, pending: true)
@@ -100,7 +111,7 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
     }
     func clear() {
         do {
-            for clip in clips { try store.remove(clip.id, queue: connected) }
+            for clip in clips { try store.remove(clip.id) }
             UserDefaults.standard.set(connected, forKey: "clearPending")
             try reload(); Task { await sync() }
         } catch { self.error = error.localizedDescription }
@@ -143,21 +154,33 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
             self.error = "This server already has a history. Get a pairing code from a connected device, then choose Join existing history."
         } catch { self.error = error.localizedDescription }
     }
-    func disconnect() {
+    func disconnect() async {
         guard !syncing else { error = "Wait for the current sync to finish, then disconnect."; return }
-        do {
+        var warning: String?
+        if connected {
             socketLoop?.cancel(); socketLoop = nil; socket?.cancel(with: .goingAway, reason: nil)
-            syncRetry?.cancel(); syncRetry = nil
-            for var clip in clips { clip.pending = true; try store.save(clip) }
-            for id in try store.deletions() { try store.deleted(id) }
-            let keyId = UUID().uuidString
-            identity.url = ""; identity.token = ""; identity.deviceId = ""
-            identity.keyId = keyId; identity.keys = [keyId: VaultCrypto.randomKey()]
-            try persist(); connected = false; devices = []; pairingCode = nil; cursor = -1
-            UserDefaults.standard.removeObject(forKey: "clearPending")
-            UserDefaults.standard.set(true, forKey: "daysPending")
-            status = "Local history"; error = nil; try reload()
-        } catch { self.error = error.localizedDescription }
+            syncing = true; status = "Disconnecting…"
+            do { _ = try await request("/v1/devices/me", method: "DELETE") }
+            catch let error as APIError where error.status == 401 {}
+            catch { warning = "Disconnected on this Mac. The server could not be reached, so remove this Mac from another paired device." }
+            syncing = false
+        }
+        do { try forget(warning) } catch { self.error = error.localizedDescription }
+    }
+    /// Return to local-only history, keeping everything captured here for the next server.
+    private func forget(_ message: String?) throws {
+        socketLoop?.cancel(); socketLoop = nil; socket?.cancel(with: .goingAway, reason: nil)
+        syncRetry?.cancel(); syncRetry = nil
+        for var clip in clips { clip.pending = true; try store.save(clip) }
+        for id in try store.deletions() { try store.deleted(id) }
+        let keyId = UUID().uuidString
+        identity.url = ""; identity.token = ""; identity.deviceId = ""
+        identity.keyId = keyId; identity.keys = [keyId: VaultCrypto.randomKey()]
+        try persist(); connected = false; devices = []; pairingCode = nil; cursor = -1
+        syncRequested = false; forceRequested = false; retryAt = .distantPast; retryDelay = 2
+        UserDefaults.standard.removeObject(forKey: "clearPending")
+        UserDefaults.standard.set(true, forKey: "daysPending")
+        status = "Local history"; error = message; try reload()
     }
     func join(code: String) async {
         do {
@@ -198,7 +221,7 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
         } catch { self.error = error.localizedDescription }
     }
     func sync(force: Bool = false) async {
-        guard !syncing else { syncRequested = true; return }
+        guard !syncing else { syncRequested = true; forceRequested = forceRequested || force; return }
         if !connected {
             do { try reload() } catch { self.error = error.localizedDescription }
             return
@@ -207,7 +230,7 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
         syncing = true
         defer {
             syncing = false
-            if syncRequested { syncRequested = false; Task { await sync() } }
+            if syncRequested { syncRequested = false; let next = forceRequested; forceRequested = false; Task { await sync(force: next) } }
         }
         do {
             try reload()
@@ -251,6 +274,9 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
             }
             try reload(); status = "Up to date"; error = nil; retryDelay = 2; retryAt = .distantPast
             syncRetry?.cancel(); syncRetry = nil
+        } catch let error as APIError where error.status == 401 {
+            do { try forget("This Mac is no longer paired. Join your history again with a code from a connected device.") }
+            catch { self.error = error.localizedDescription }
         } catch {
             status = "Offline · will retry"; self.error = error.localizedDescription
             let delay = retryDelay

@@ -59,7 +59,10 @@ final class Store {
         let statement = try prepare(sql, args); defer { sqlite3_finalize(statement) }
         var result: [[String]] = []
         while sqlite3_step(statement) == SQLITE_ROW {
-            result.append((0..<sqlite3_column_count(statement)).map { String(cString: sqlite3_column_text(statement, $0)) })
+            result.append((0..<sqlite3_column_count(statement)).map { index in
+                guard let text = sqlite3_column_text(statement, index) else { return "" }
+                return String(cString: text)
+            })
         }
         return result
     }

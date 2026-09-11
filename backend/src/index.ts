@@ -128,13 +128,25 @@ export class Vault extends DurableObject<Env> {
       if (!validID(b.keyId) || b.keyId === settings.keyId || b.removeDevice === device.id) fail("Invalid device removal.");
       this.ctx.storage.transactionSync(() => {
         if (!this.rows("SELECT id FROM devices WHERE id=?", b.removeDevice)[0]) fail("Device not found.", 404);
-        for (const d of this.rows("SELECT id FROM devices WHERE id<>?", b.removeDevice)) this.sql.exec("INSERT INTO keys VALUES(?,?,?)", d.id, b.keyId, this.envelope(b.envelopes?.[String(d.id)]));
+        for (const d of this.rows("SELECT id FROM devices WHERE id<>?", b.removeDevice)) this.sql.exec("INSERT OR REPLACE INTO keys VALUES(?,?,?)", d.id, b.keyId, this.envelope(b.envelopes?.[String(d.id)]));
         this.sql.exec("DELETE FROM devices WHERE id=?", b.removeDevice);
         this.sql.exec("DELETE FROM keys WHERE deviceId=?", b.removeDevice);
         this.sql.exec("DELETE FROM invitations"); this.sql.exec("UPDATE settings SET keyId=? WHERE id=1", b.keyId);
       });
       for (const socket of this.ctx.getWebSockets(b.removeDevice)) socket.close(1008, "Device removed");
       this.changed(); return json({ ok: true });
+    }
+    if (path === "/v1/devices/me" && method === "DELETE") {
+      const last = !this.rows("SELECT id FROM devices WHERE id<>?", device.id).length;
+      this.ctx.storage.transactionSync(() => {
+        this.sql.exec("DELETE FROM devices WHERE id=?", device.id);
+        this.sql.exec("DELETE FROM keys WHERE deviceId=?", device.id);
+        this.sql.exec("DELETE FROM invitations");
+        if (last) { for (const item of this.rows("SELECT id FROM items")) this.remove(String(item.id)); this.sql.exec("DELETE FROM settings"); }
+      });
+      for (const socket of this.ctx.getWebSockets(String(device.id))) socket.close(1008, "Device disconnected");
+      if (!last) this.changed();
+      await this.schedule(); return json({ ok: true });
     }
     if (path === "/v1/items" && method === "DELETE") {
       for (const item of this.rows("SELECT id FROM items")) this.remove(String(item.id));
@@ -160,9 +172,11 @@ export class Vault extends DurableObject<Env> {
           if (keyId !== settings.keyId) fail("Refresh encryption keys and retry.", 409);
           if (this.rows("SELECT id FROM items WHERE id=?", id)[0]) return json({ ok: true });
           const length = Number(request.headers.get("Content-Length"));
-          if (!length || length > MAX_BLOB || length < 28) fail("Content is too large or empty.", 413);
-          const data = await readBody(request, length); if (data.byteLength !== length) fail("Invalid content size.", 413);
-          await this.env.BLOBS.put(id, data);
+          if (!length || length > MAX_BLOB || length < 28 || !request.body) fail("Content is too large or empty.", 413);
+          const stream = new FixedLengthStream(length), upload = this.env.BLOBS.put(id, stream.readable);
+          const sent = await request.body.pipeTo(stream.writable).then(() => true, () => false);
+          if (!sent) { await upload.catch(() => {}); fail("Invalid content size.", 413); }
+          await upload;
           if (this.rows("SELECT id FROM deleted WHERE id=?", id)[0] || this.settings().keyId !== keyId || !this.rows("SELECT id FROM devices WHERE id=?", device.id)[0] || !active(createdAt, Number(this.settings().days))) {
             this.sql.exec("INSERT OR IGNORE INTO garbage VALUES(?)", id); await this.schedule(); fail("State changed. Refresh and retry.", 409);
           }
@@ -178,10 +192,12 @@ export class Vault extends DurableObject<Env> {
     this.sql.exec("INSERT OR IGNORE INTO garbage VALUES(?)", id); this.sql.exec("DELETE FROM items WHERE id=?", id);
   }
   async alarm() {
-    const settings = this.settings(); if (!settings) return;
-    const expired = this.rows("SELECT id FROM items WHERE createdAt<=?", Date.now() - Number(settings.days) * DAY);
-    for (const item of expired) this.remove(String(item.id));
-    if (expired.length) this.changed();
+    const settings = this.settings();
+    if (settings) {
+      const expired = this.rows("SELECT id FROM items WHERE createdAt<=?", Date.now() - Number(settings.days) * DAY);
+      for (const item of expired) this.remove(String(item.id));
+      if (expired.length) this.changed();
+    }
     this.sql.exec("DELETE FROM invitations WHERE expires<?", Date.now()); this.sql.exec("DELETE FROM deleted WHERE expires<?", Date.now());
     for (const row of this.rows("SELECT id FROM garbage LIMIT 100")) {
       if (this.uploads.has(String(row.id))) continue;
@@ -198,7 +214,9 @@ export class Vault extends DurableObject<Env> {
     }
     if (page.truncated) await this.ctx.storage.put("blobScanCursor", page.cursor);
     else await this.ctx.storage.delete("blobScanCursor");
-    await this.ctx.storage.setAlarm(Date.now() + (this.rows("SELECT id FROM garbage LIMIT 1").length ? 60_000 : 3_600_000));
+    const pending = this.rows("SELECT id FROM garbage LIMIT 1").length > 0;
+    // An abandoned deployment stops waking up once its storage is collected.
+    if (settings || pending || page.truncated) await this.ctx.storage.setAlarm(Date.now() + (pending ? 60_000 : 3_600_000));
   }
   webSocketMessage(socket: WebSocket, message: string | ArrayBuffer) { if (message === "ping") socket.send("pong"); }
 }

@@ -6,10 +6,10 @@ Last updated 11 September 2026. The current identifiers are `dev.midplane.zap` o
 
 | Component | Evidence |
 | --- | --- |
-| Backend | TypeScript check and local Cloudflare integration tests pass with the updated toolchain. Tests cover setup authorization, one-use pairing, upload retries/concurrency, retrieval, cursors, deletion, expiry, revocation, and malformed/oversized requests. |
+| Backend | TypeScript check and local Cloudflare integration tests pass with the updated toolchain. Tests cover setup authorization, one-use pairing, upload retries/concurrency, retrieval, cursors, deletion, expiry, revocation by a peer, self-revocation on disconnect, the last device resetting the deployment, and malformed/oversized requests. |
 | Deployment | Wrangler dry-run bundles successfully with one Durable Object and the intended R2 binding. This review did not deploy backend changes. |
 | Mac | The documented build script compiles with Swift 6.1.2/macOS 15.5 SDK, targets macOS 14, and produces an arm64 app that passes signature verification. Shared crypto vectors and tamper rejection pass. Option+Space opens and closes history. |
-| Android | Debug assembly, JVM crypto checks, and lint pass. The renamed app installs alongside the earlier development app on the connected Pixel 10 Pro. Its new identity also passed pairing and a synthetic text upload against the local backend on the emulator. |
+| Android | Unit tests (including the shared crypto vectors, which also cover reading the curve parameters directly) and lint pass. Debug assembly, installation alongside the earlier development app on a connected Pixel 10 Pro, and that identity passing pairing and a synthetic text upload against the local backend on the emulator are from the earlier pass. |
 | Native UI | Mac history and compact pairing sheet, Android empty/populated history and settings, launcher artwork, and light/dark appearance were inspected. Android larger text was checked on the emulator. |
 
 ## Earlier integration coverage
@@ -40,5 +40,7 @@ Idle sync now uses Mac live notifications with a five-minute fallback, bounded r
 The updated Mac app reached “Up to date” from `/Applications`. The updated Android app launched on the emulator in local-only mode with zero registered Zap background jobs. No physical phone was connected for this pass.
 
 ## Not established
+
+`DELETE /v1/devices/me` has only been exercised by the local integration test. Neither native client's disconnect path, nor the 401 re-pairing path, has been run against a deployed Worker, and no backend changes were deployed. Uploads now stream into R2 through a fixed-length stream; a real multi-megabyte upload against R2 has not been re-run.
 
 Large-history performance, lost enrollment responses, interrupted share imports, storage corruption recovery, physical-phone battery/OEM behavior, Android 10 hardware, Intel Mac builds, actual login startup, release signing/notarization, OS screen-reader traversal, tablets/foldables, and production failure recovery remain unverified. See [production-readiness.md](production-readiness.md) for prioritized findings.

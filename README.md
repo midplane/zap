@@ -56,10 +56,10 @@ cd ..
 The script provisions `zap-content` in R2, deploys the Worker/Durable Object, and prints a random setup token. R2 must be enabled in your Cloudflare account. Choose a different Worker/bucket name in `backend/wrangler.jsonc` and the deployment script if these names already belong to another project.
 
 1. Open Mac Settings, enter the deployed HTTPS Worker URL and setup token, and connect.
-2. Choose **Pair Android**. On Android, open Settings → **Scan pairing code**.
+2. Choose **Pair another device**. On Android, open Settings → **Scan pairing code**.
 3. Confirm the connection on the phone. QR invitations expire after five minutes and can be used once. The code contains encryption keys; keep it private. Manual code entry is available if scanning is inconvenient.
 
-An existing phone can create a code with **Pair another device**. On a replacement Mac, use **Join existing history**. **Disconnect** forgets the server connection while retaining local history; that history uploads when you connect to another server.
+Any connected device can create a code with **Pair another device**. To add a second or replacement Mac, copy the code from the pairing sheet, then paste it into **Join existing history** in Settings on the new Mac — the same code works for a Mac or a phone. **Disconnect** forgets the server connection while retaining local history; that history uploads when you connect to another server.
 
 The setup token initializes a server once. If you see “This deployment is already initialized,” join using a pairing code from a connected device. This also applies after changing the app identifier; the previous app can still create a pairing code.
 

@@ -58,6 +58,8 @@ class Repository(private val context: Context) {
     val error = MutableStateFlow<String?>(null)
     val devices = MutableStateFlow<List<JSONObject>>(emptyList())
     val connected = MutableStateFlow(identity.connected)
+    val server = MutableStateFlow(identity.value("url"))
+    val deviceId = MutableStateFlow(identity.value("deviceId"))
     init { scope.launch { mutex.withLock { try { refresh() } catch (e: Exception) { error.value = e.message } } } }
     private suspend fun save(clip: Clip) {
         val file = File(directory, clip.id)
@@ -142,7 +144,7 @@ class Repository(private val context: Context) {
     suspend fun clear() = withContext(Dispatchers.IO) {
         mutex.withLock {
             prefs.edit().putBoolean("clearPending", identity.connected).commit()
-            for (clip in dao.all()) { if (identity.connected) dao.queue(Deletion(clip.id)); removeLocal(clip.id) }
+            for (clip in dao.all()) removeLocal(clip.id)
             refresh()
         }; enqueue()
     }
@@ -151,9 +153,9 @@ class Repository(private val context: Context) {
             days.value = value.coerceIn(1, 365); prefs.edit().putInt("days", days.value).putBoolean("daysPending", true).commit(); refresh()
         }; enqueue()
     }
-    private fun request(path: String, method: String = "GET", body: ByteArray? = null, headers: Map<String, String> = emptyMap(), url: String = identity.state.getString("url")): ByteArray {
+    private fun request(path: String, method: String = "GET", body: ByteArray? = null, headers: Map<String, String> = emptyMap(), url: String = identity.value("url")): ByteArray {
         val builder = Request.Builder().url(url + path)
-        if (url == identity.state.getString("url") && identity.connected) builder.header("Authorization", "Bearer ${identity.state.getString("token")}")
+        if (url == identity.value("url") && identity.connected) builder.header("Authorization", "Bearer ${identity.value("token")}")
         for ((key, value) in headers) builder.header(key, value)
         builder.method(method, if (method in listOf("POST", "PUT")) (body ?: ByteArray(0)).toRequestBody() else body?.toRequestBody())
         http.newCall(builder.build()).execute().use { response ->
@@ -170,7 +172,7 @@ class Repository(private val context: Context) {
             val url = pairing.getString("url").trimEnd('/')
             val endpoint = Uri.parse(url)
             require(endpoint.scheme == "https" || (BuildConfig.DEBUG && endpoint.scheme == "http" && endpoint.host in listOf("localhost", "127.0.0.1"))) { "Pairing requires an HTTPS server." }
-            val keys = pairing.getJSONObject("keys"); val keyId = pairing.getString("keyId"); val public = identity.state.getString("public").unb64()
+            val keys = pairing.getJSONObject("keys"); val keyId = pairing.getString("keyId"); val public = identity.value("public").unb64()
             val envelopes = JSONObject()
             keys.keys().forEach { id ->
                 val key = keys.getString(id).unb64()
@@ -179,8 +181,8 @@ class Repository(private val context: Context) {
             }
             val body = JSONObject().put("token", pairing.getString("token")).put("name", Build.MODEL).put("publicKey", public.b64()).put("keyId", keyId).put("envelope", envelopes.getJSONObject(keyId)).put("historyEnvelopes", envelopes)
             val result = JSONObject(String(request("/v1/pair", "POST", body.toString().toByteArray(), url = url)))
-            identity.state.put("url", url).put("token", result.getString("token")).put("deviceId", result.getString("deviceId")).put("keyId", keyId).put("keys", keys)
-            identity.save(); connected.value = true; cursor = -1; error.value = null
+            identity.update("url" to url, "token" to result.getString("token"), "deviceId" to result.getString("deviceId"), "keyId" to keyId, "keys" to keys)
+            connected.value = true; server.value = url; deviceId.value = result.getString("deviceId"); cursor = -1; error.value = null
         }
         updateBackgroundSync(); sync(); if (active) connectSocket()
     }
@@ -188,20 +190,33 @@ class Repository(private val context: Context) {
         sync()
         mutex.withLock {
             val token = JSONObject(String(request("/v1/invitations", "POST"))).getString("token")
-            val code = JSONObject().put("url", identity.state.getString("url")).put("token", token).put("keyId", identity.state.getString("keyId")).put("keys", identity.keys)
+            val code = JSONObject().put("url", identity.value("url")).put("token", token).put("keyId", identity.value("keyId")).put("keys", identity.keys())
             "zap://pair#" + java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(code.toString().toByteArray())
         }
     }
     suspend fun disconnect() = withContext(Dispatchers.IO) {
         mutex.withLock {
-            socket?.close(1000, null); socket = null; reconnect?.cancel()
-            for (clip in clips.value) save(clip.copy(pending = true))
-            for (id in dao.deletions()) dao.deleted(id)
-            identity.state.put("url", "").put("token", "").put("deviceId", "").put("keyId", "").put("keys", JSONObject())
-            identity.save(); connected.value = false; cursor = -1; devices.value = emptyList()
-            prefs.edit().remove("clearPending").putBoolean("daysPending", true).commit()
-            status.value = "Local history"; error.value = null; refresh()
+            var warning: String? = null
+            if (identity.connected) {
+                socket?.close(1000, null); socket = null; reconnect?.cancel(); status.value = "Disconnecting…"
+                val unreachable = "Disconnected on this phone. The server could not be reached, so remove this phone from another paired device."
+                warning = try { request("/v1/devices/me", "DELETE"); null }
+                catch (e: CancellationException) { throw e }
+                catch (e: ApiException) { if (e.status == 401) null else unreachable }
+                catch (e: Exception) { unreachable }
+            }
+            forget(warning)
         }
+    }
+    /** Return to local-only history, keeping everything captured here for the next server. */
+    private suspend fun forget(message: String?) {
+        socket?.close(1000, null); socket = null; reconnect?.cancel()
+        for (clip in clips.value) save(clip.copy(pending = true))
+        for (id in dao.deletions()) dao.deleted(id)
+        identity.update("url" to "", "token" to "", "deviceId" to "", "keyId" to "", "keys" to JSONObject())
+        connected.value = false; server.value = ""; deviceId.value = ""; cursor = -1; devices.value = emptyList()
+        prefs.edit().remove("clearPending").putBoolean("daysPending", true).commit()
+        status.value = "Local history"; error.value = message; refresh()
         updateBackgroundSync()
     }
     suspend fun removeDevice(deviceId: String) = withContext(Dispatchers.IO) {
@@ -222,12 +237,12 @@ class Repository(private val context: Context) {
                 if (prefs.getBoolean("daysPending", false)) { request("/v1/settings", "PUT", JSONObject().put("days", days.value).toString().toByteArray()); prefs.edit().remove("daysPending").commit() }
                 val state = JSONObject(String(request("/v1/sync?cursor=$cursor")))
                 val keys = state.getJSONArray("keys")
-                var identityChanged = identity.state.getString("keyId") != state.getString("keyId")
+                var identityChanged = identity.value("keyId") != state.getString("keyId")
                 for (i in 0 until keys.length()) {
                     val entry = keys.getJSONObject(i); val id = entry.getString("keyId")
-                    if (!identity.keys.has(id)) { identity.keys.put(id, Crypto.unwrap(entry.getJSONObject("envelope"), identity.state.getString("private").unb64(), id).b64()); identityChanged = true }
+                    if (!identity.hasKey(id)) { identity.putKey(id, Crypto.unwrap(entry.getJSONObject("envelope"), identity.value("private").unb64(), id)); identityChanged = true }
                 }
-                identity.state.put("keyId", state.getString("keyId")); if (identityChanged) identity.save()
+                identity.put("keyId", state.getString("keyId")); if (identityChanged) identity.save()
                 if (days.value != state.getInt("days")) { days.value = state.getInt("days"); prefs.edit().putInt("days", days.value).commit() }
                 val deviceList = state.getJSONArray("devices"); devices.value = (0 until deviceList.length()).map { deviceList.getJSONObject(it) }
                 if (!state.isNull("items")) {
@@ -237,7 +252,7 @@ class Repository(private val context: Context) {
                     for (item in items.filter { it.getString("id") !in localIds }) {
                         val id = item.getString("id")
                         try {
-                            val raw = Crypto.open(request("/v1/items/$id"), identity.keys.getString(item.getString("keyId")).unb64(), id)
+                            val raw = Crypto.open(request("/v1/items/$id"), identity.key(item.getString("keyId")), id)
                             val payload = JSONObject(String(raw)); require(payload.getLong("createdAt") == item.getLong("createdAt")) { "Content metadata did not match" }
                             save(Clip(id, item.getLong("createdAt"), payload, false))
                         } catch (e: ApiException) { if (e.status != 404) throw e }
@@ -245,13 +260,18 @@ class Repository(private val context: Context) {
                 }
                 cursor = state.getLong("cursor"); refresh()
                 for (clip in clips.value.filter { it.pending }) {
-                    val keyId = identity.state.getString("keyId")
-                    val encrypted = Crypto.seal(clip.payload.toString().toByteArray(), identity.keys.getString(keyId).unb64(), clip.id)
+                    val keyId = identity.value("keyId")
+                    val encrypted = Crypto.seal(clip.payload.toString().toByteArray(), identity.key(keyId), clip.id)
                     try { request("/v1/items/${clip.id}", "PUT", encrypted, mapOf("X-Key-Id" to keyId, "X-Created-At" to clip.createdAt.toString())); dao.sent(clip.id) }
                     catch (e: ApiException) { if (e.status == 410) removeLocal(clip.id) else throw e }
                 }
                 refresh(); status.value = "Up to date"; error.value = null; true
             } catch (e: CancellationException) { throw e }
+            catch (e: ApiException) {
+                if (e.status == 401) forget("This phone is no longer paired. Scan a new pairing code to rejoin your history.")
+                else { status.value = "Offline · will retry"; error.value = e.message }
+                false
+            }
             catch (e: Exception) { status.value = "Offline · will retry"; error.value = e.message ?: "Could not sync"; false }
         }
     }
@@ -262,7 +282,7 @@ class Repository(private val context: Context) {
     }
     @Synchronized private fun connectSocket() {
         if (!active || !identity.connected || socket != null) return
-        val request = Request.Builder().url(identity.state.getString("url") + "/v1/events").header("Authorization", "Bearer ${identity.state.getString("token")}").build()
+        val request = Request.Builder().url(identity.value("url") + "/v1/events").header("Authorization", "Bearer ${identity.value("token")}").build()
         socket = http.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) { socketChanged(webSocket) }
             override fun onMessage(webSocket: WebSocket, text: String) { socketChanged(webSocket) }

@@ -40,6 +40,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
+import org.json.JSONObject
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -196,7 +197,13 @@ class MainActivity : ComponentActivity() {
         AlertDialog(onDismissRequest = { manualPair = false }, title = { Text("Pair with Mac") }, text = { OutlinedTextField(code, { code = it }, label = { Text("Pairing code") }, maxLines = 5) }, confirmButton = { TextButton(onClick = { pairing = code.trim(); manualPair = false }, enabled = code.isNotBlank()) { Text("Continue") } }, dismissButton = { TextButton(onClick = { manualPair = false }) { Text("Cancel") } })
     }
     pairing?.let { code ->
-        AlertDialog(onDismissRequest = { if (!pairingBusy) pairing = null }, title = { Text("Connect this phone?") }, text = { Text("This gives this phone access to the encrypted history shared by your Mac.") }, confirmButton = {
+        val host = remember(code) { pairingHost(code) }
+        AlertDialog(onDismissRequest = { if (!pairingBusy) pairing = null }, title = { Text("Connect this phone?") }, text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(host ?: "This code does not name a server.", style = MaterialTheme.typography.titleMedium)
+                Text("This phone will join the encrypted history on that server. Only continue with a code you created on a device you already use.")
+            }
+        }, confirmButton = {
             TextButton(enabled = !pairingBusy, onClick = { pairingBusy = true; scope.launch { try { repo.pair(code); pairing = null } catch (e: Exception) { repo.error.value = e.message } finally { pairingBusy = false } } }) { Text(if (pairingBusy) "Connecting…" else "Connect") }
         }, dismissButton = { TextButton(enabled = !pairingBusy, onClick = { pairing = null }) { Text("Cancel") } })
     }
@@ -207,6 +214,8 @@ class MainActivity : ComponentActivity() {
     val connected by repo.connected.collectAsStateWithLifecycle()
     val devices by repo.devices.collectAsStateWithLifecycle()
     val status by repo.status.collectAsStateWithLifecycle()
+    val server by repo.server.collectAsStateWithLifecycle()
+    val self by repo.deviceId.collectAsStateWithLifecycle()
     var retention by remember(days) { mutableStateOf(days.toString()) }
     var clearing by remember { mutableStateOf(false) }
     var disconnecting by remember { mutableStateOf(false) }
@@ -228,19 +237,19 @@ class MainActivity : ComponentActivity() {
             Text(if (connected) "Connected devices" else "Connect your Mac", style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.height(12.dp))
             if (!connected) {
-                Text("In Zap on Mac, open Settings and choose Pair Android. Your content is encrypted before it leaves either device.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("In Zap on Mac, open Settings and choose Pair another device. Your content is encrypted before it leaves either device.", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.height(16.dp))
                 Button(onClick = onScan) { Icon(Icons.Outlined.QrCodeScanner, null); Spacer(Modifier.width(8.dp)); Text("Scan pairing code") }
                 TextButton(onClick = onManual) { Text("Enter pairing code") }
             } else {
-                Text(repo.identity.state.getString("url"), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(server, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text(status, style = MaterialTheme.typography.labelMedium)
             }
         }
         items(devices, key = { it.getString("id") }) { device ->
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text(device.getString("name"), Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
-                if (device.getString("id") != repo.identity.state.getString("deviceId")) TextButton(onClick = { remove = device.getString("id") }) { Text("Remove") }
+                if (device.getString("id") != self) TextButton(onClick = { remove = device.getString("id") }) { Text("Remove") }
                 else Text("This phone", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
@@ -277,6 +286,9 @@ class MainActivity : ComponentActivity() {
     AsyncImage(data, "Clipboard image", modifier, contentScale = ContentScale.Fit)
 }
 
+private fun pairingHost(code: String): String? = runCatching {
+    Uri.parse(JSONObject(String(java.util.Base64.getUrlDecoder().decode(code.substringAfter('#')))).getString("url")).host
+}.getOrNull()
 private fun relativeDate(time: Long): String {
     val minutes = (System.currentTimeMillis() - time).coerceAtLeast(0) / 60_000
     return when { minutes < 1 -> "Just now"; minutes < 60 -> "${minutes}m ago"; minutes < 1440 -> "${minutes / 60}h ago"; else -> DateFormat.getDateInstance(DateFormat.SHORT).format(Date(time)) }
