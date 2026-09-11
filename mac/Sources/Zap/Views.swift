@@ -14,9 +14,9 @@ struct HistoryView: View {
                 Button { model.settingsOpen = true } label: { Image(systemName: "gearshape") }.buttonStyle(.plain).help("Settings")
             }.padding(20)
             HStack {
-                Picker("Content", selection: $model.filter) { ForEach(["All", "Text", "Images"], id: \.self) { Text($0) } }.pickerStyle(.segmented).frame(width: 220)
+                Picker("Content", selection: $model.filter) { ForEach(["All", "Text", "Images"], id: \.self) { Text($0) } }.pickerStyle(.segmented).labelsHidden().frame(width: 220)
                 Spacer()
-                Text("\(model.filtered.count) items").font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                Text(model.filtered.count == 1 ? "1 item" : "\(model.filtered.count) items").font(.caption).foregroundStyle(.secondary).monospacedDigit()
             }.padding(.horizontal, 20).padding(.bottom, 12)
             Divider()
             if model.filtered.isEmpty {
@@ -54,7 +54,7 @@ struct HistoryView: View {
                 Circle().fill(model.status == "Up to date" ? Color.green : Color.secondary).frame(width: 5, height: 5)
                 Text(model.pendingCount > 0 && model.connected ? "\(model.pendingCount) pending" : model.status)
                 Spacer()
-                Text("↑↓ navigate    Space preview    ↵ paste").foregroundStyle(.tertiary)
+                Text("↑↓ navigate    Space preview    ↵ paste").foregroundStyle(.secondary)
             }.font(.caption).foregroundStyle(.secondary).padding(.horizontal, 20).padding(.vertical, 12)
         }.frame(minWidth: 580, minHeight: 420).background(.background)
         .onAppear { searchFocused = true }
@@ -113,6 +113,8 @@ struct SettingsView: View {
     @State private var url = ""
     @State private var token = ""
     @State private var busy = false
+    @State private var joinCode = ""
+    @State private var disconnecting = false
     @State private var clearing = false
     @State private var startup = SMAppService.mainApp.status == .enabled
     @State private var shortcut = UserDefaults.standard.string(forKey: "shortcut") ?? "v"
@@ -142,11 +144,15 @@ struct SettingsView: View {
                         }
                         Button("Pair Android…") { Task { await model.invite() } }
                         Button("Sync now") { Task { await model.sync(force: true) } }
+                        Button("Disconnect…") { disconnecting = true }
                     } else {
                         Text("Deploy Zap to your Cloudflare account, then enter the URL and setup token printed by the deployment script.").foregroundStyle(.secondary)
                         TextField("https://zap.your-account.workers.dev", text: $url)
                         SecureField("Setup token", text: $token)
                         Button(busy ? "Connecting…" : "Connect") { busy = true; Task { await model.setup(url: url, token: token); busy = false; if model.connected { token = "" } } }.disabled(busy || url.isEmpty || token.isEmpty)
+                        Divider()
+                        SecureField("Pairing code from another device", text: $joinCode)
+                        Button("Join existing history") { busy = true; Task { await model.join(code: joinCode.trimmingCharacters(in: .whitespacesAndNewlines)); busy = false; if model.connected { joinCode = "" } } }.disabled(busy || joinCode.isEmpty)
                     }
                 }
             }.formStyle(.grouped)
@@ -165,6 +171,7 @@ struct SettingsView: View {
             }
             if let error = model.error { Text(error).font(.caption).foregroundStyle(.red) }
         }.padding(24).frame(width: 560, height: model.pairingCode == nil ? 570 : 780)
+        .confirmationDialog("Disconnect from this server? Local history stays on this Mac and will upload when you connect again.", isPresented: $disconnecting) { Button("Disconnect") { model.disconnect() } }
         .confirmationDialog("Clear history on all connected devices?", isPresented: $clearing) { Button("Clear history", role: .destructive) { model.clear() } }
     }
     func qrImage(_ text: String) -> NSImage? {

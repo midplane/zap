@@ -32,6 +32,7 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
     private var socketLoop: Task<Void, Never>?
     private var changeCount = NSPasteboard.general.changeCount
     private var lastFingerprint: Data?
+    private var syncRequested = false
     private var retryAt = Date.distantPast
     private var retryDelay: TimeInterval = 2
     var dismiss: (() -> Void)?
@@ -139,6 +140,40 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
             await sync(); connectSocket()
         } catch { self.error = error.localizedDescription }
     }
+    func disconnect() {
+        guard !syncing else { error = "Wait for the current sync to finish, then disconnect."; return }
+        do {
+            socketLoop?.cancel(); socketLoop = nil; socket?.cancel(with: .goingAway, reason: nil)
+            for var clip in clips { clip.pending = true; try store.save(clip) }
+            for id in try store.deletions() { try store.deleted(id) }
+            let keyId = UUID().uuidString
+            identity.url = ""; identity.token = ""; identity.deviceId = ""
+            identity.keyId = keyId; identity.keys = [keyId: VaultCrypto.randomKey()]
+            try persist(); connected = false; devices = []; pairingCode = nil; cursor = -1
+            UserDefaults.standard.removeObject(forKey: "clearPending")
+            UserDefaults.standard.set(true, forKey: "daysPending")
+            status = "Local history"; error = nil; try reload()
+        } catch { self.error = error.localizedDescription }
+    }
+    func join(code: String) async {
+        do {
+            guard code.hasPrefix("zap://pair#") else { throw ZapError("Enter a pairing code from an existing device.") }
+            var encoded = String(code.dropFirst(11)).replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+            encoded += String(repeating: "=", count: (4 - encoded.count % 4) % 4)
+            guard let data = Data(base64Encoded: encoded) else { throw ZapError("Invalid pairing code.") }
+            let pairing = try JSONDecoder().decode(PairCode.self, from: data)
+            guard let url = URL(string: pairing.url), url.scheme == "https" || (url.scheme == "http" && ["localhost", "127.0.0.1"].contains(url.host ?? "")) else { throw ZapError("Use an HTTPS server URL.") }
+            let keys = try pairing.keys.mapValues { value -> Data in
+                guard let data = Data(base64Encoded: value), data.count == 32 else { throw ZapError("Invalid pairing key.") }; return data
+            }
+            var envelopes: [String: Any] = [:]
+            for (keyId, key) in keys { envelopes[keyId] = try envelopeJSON(VaultCrypto.wrap(key, for: identity.publicKey, keyId: keyId)) }
+            guard let envelope = envelopes[pairing.keyId] else { throw ZapError("Pairing key is missing.") }
+            let auth = try JSONDecoder().decode(Credentials.self, from: await request("/v1/pair", method: "POST", body: json(["token": pairing.token, "name": Host.current().localizedName ?? "Mac", "publicKey": identity.publicKey, "keyId": pairing.keyId, "envelope": envelope, "historyEnvelopes": envelopes]), endpoint: pairing.url))
+            identity.url = pairing.url; identity.token = auth.token; identity.deviceId = auth.deviceId; identity.keyId = pairing.keyId; identity.keys = keys
+            try persist(); connected = true; error = nil; retryAt = .distantPast; await sync(); connectSocket()
+        } catch { self.error = error.localizedDescription }
+    }
     func invite() async {
         do {
             await sync()
@@ -158,8 +193,17 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
         } catch { self.error = error.localizedDescription }
     }
     func sync(force: Bool = false) async {
-        guard connected, !syncing, force || Date() >= retryAt else { return }
-        syncing = true; defer { syncing = false }
+        guard !syncing else { syncRequested = true; return }
+        if !connected {
+            do { try reload() } catch { self.error = error.localizedDescription }
+            return
+        }
+        guard force || Date() >= retryAt else { return }
+        syncing = true
+        defer {
+            syncing = false
+            if syncRequested { syncRequested = false; Task { await sync() } }
+        }
         do {
             try reload()
             if UserDefaults.standard.bool(forKey: "clearPending") {
@@ -196,7 +240,7 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
                     try store.sent(clip.id)
                 } catch let error as APIError where error.status == 410 { try store.remove(clip.id) }
             }
-            try reload(); status = "Up to date"; retryDelay = 2; retryAt = .distantPast
+            try reload(); status = "Up to date"; error = nil; retryDelay = 2; retryAt = .distantPast
         } catch {
             status = "Offline · will retry"; self.error = error.localizedDescription
             retryAt = Date().addingTimeInterval(retryDelay); retryDelay = min(retryDelay * 2, 120)

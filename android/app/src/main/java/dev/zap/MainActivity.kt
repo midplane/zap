@@ -49,7 +49,7 @@ class MainActivity : ComponentActivity() {
         if (savedInstanceState == null) receive(intent)
         setContent {
             val dark = androidx.compose.foundation.isSystemInDarkTheme()
-            MaterialTheme(colorScheme = if (dark) darkColorScheme(primary = Color(0xFFA8C7FA)) else lightColorScheme(primary = Color(0xFF245AC5))) {
+            MaterialTheme(colorScheme = if (dark) darkColorScheme(primary = Color(0xFFA8C7FA), primaryContainer = Color(0xFF173E78), onPrimaryContainer = Color(0xFFDCE8FF), secondaryContainer = Color(0xFF343D4B), onSecondaryContainer = Color(0xFFE0E6F0), surface = Color(0xFF121419), background = Color(0xFF121419)) else lightColorScheme(primary = Color(0xFF245AC5), primaryContainer = Color(0xFFDCE8FF), onPrimaryContainer = Color(0xFF123A73), secondaryContainer = Color(0xFFE6EAF1), onSecondaryContainer = Color(0xFF394453), surface = Color(0xFFFAFAFC), background = Color(0xFFFAFAFC))) {
                 ZapScreen(repo, incomingPair, { incomingPair = null }, incomingShare, { finish() })
             }
         }
@@ -193,6 +193,9 @@ class MainActivity : ComponentActivity() {
     val status by repo.status.collectAsState()
     var retention by remember(days) { mutableStateOf(days.toString()) }
     var clearing by remember { mutableStateOf(false) }
+    var disconnecting by remember { mutableStateOf(false) }
+    var invitation by remember { mutableStateOf<String?>(null) }
+    val context = LocalContext.current
     var remove by remember { mutableStateOf<String?>(null) }
     LazyColumn(Modifier.widthIn(max = 680.dp).fillMaxSize(), contentPadding = PaddingValues(24.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
         item {
@@ -225,8 +228,14 @@ class MainActivity : ComponentActivity() {
                 else Text("This phone", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
-        if (connected) item { TextButton(onClick = { onAction { repo.sync() } }) { Text("Sync now") } }
+        if (connected) item {
+            TextButton(onClick = { onAction { repo.sync() } }) { Text("Sync now") }
+            TextButton(onClick = { onAction { invitation = repo.invite() } }) { Text("Pair another device") }
+            TextButton(onClick = { disconnecting = true }) { Text("Disconnect") }
+        }
     }
+    invitation?.let { code -> AlertDialog(onDismissRequest = { invitation = null }, title = { Text("Pair another device") }, text = { Text("Copy this private code and enter it in Zap on the new device. It expires in five minutes.") }, confirmButton = { TextButton(onClick = { context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Pairing code", code)); invitation = null }) { Text("Copy code") } }, dismissButton = { TextButton(onClick = { invitation = null }) { Text("Cancel") } }) }
+    if (disconnecting) AlertDialog(onDismissRequest = { disconnecting = false }, title = { Text("Disconnect?") }, text = { Text("Local history stays on this phone and will upload when you connect again.") }, confirmButton = { TextButton(onClick = { disconnecting = false; onAction { repo.disconnect() } }) { Text("Disconnect") } }, dismissButton = { TextButton(onClick = { disconnecting = false }) { Text("Cancel") } })
     if (clearing) AlertDialog(onDismissRequest = { clearing = false }, title = { Text("Clear history?") }, text = { Text("History will be deleted on all connected devices when they sync.") }, confirmButton = { TextButton(onClick = { clearing = false; onAction { repo.clear() } }) { Text("Clear history") } }, dismissButton = { TextButton(onClick = { clearing = false }) { Text("Cancel") } })
     remove?.let { id -> AlertDialog(onDismissRequest = { remove = null }, title = { Text("Remove this device?") }, text = { Text("It will no longer receive new items. Content already downloaded remains on that device.") }, confirmButton = { TextButton(onClick = { remove = null; onAction { repo.removeDevice(id) } }) { Text("Remove") } }, dismissButton = { TextButton(onClick = { remove = null }) { Text("Cancel") } }) }
 }

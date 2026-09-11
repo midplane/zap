@@ -158,6 +158,13 @@ export class Vault extends DurableObject<Env> {
     if (expired.length) this.changed();
     this.sql.exec("DELETE FROM invitations WHERE expires<?", Date.now()); this.sql.exec("DELETE FROM deleted WHERE expires<?", Date.now());
     for (const row of this.rows("SELECT id FROM garbage LIMIT 100")) { await this.env.BLOBS.delete(String(row.id)); this.sql.exec("DELETE FROM garbage WHERE id=?", row.id); }
+    const cursor = await this.ctx.storage.get<string>("blobScanCursor");
+    const page = await this.env.BLOBS.list({ limit: 1000, cursor });
+    for (const blob of page.objects) {
+      if (blob.uploaded.getTime() < Date.now() - 3_600_000 && !this.rows("SELECT id FROM items WHERE id=?", blob.key)[0]) await this.env.BLOBS.delete(blob.key);
+    }
+    if (page.truncated) await this.ctx.storage.put("blobScanCursor", page.cursor);
+    else await this.ctx.storage.delete("blobScanCursor");
     await this.ctx.storage.setAlarm(Date.now() + (this.rows("SELECT id FROM garbage LIMIT 1").length ? 60_000 : 3_600_000));
   }
   webSocketMessage(socket: WebSocket, message: string | ArrayBuffer) { if (message === "ping") socket.send("pong"); }

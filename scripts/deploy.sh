@@ -3,7 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../backend"
 npm ci
 npx wrangler whoami
-if ! npx wrangler r2 bucket list --json | node --input-type=module -e 'let s=""; for await (const c of process.stdin) s+=c; process.exit(JSON.parse(s).some(x=>x.name==="zap-content")?0:1)'; then
+if ! npx wrangler r2 bucket info zap-content --json > /dev/null; then
   npx wrangler r2 bucket create zap-content
 fi
 npx wrangler deploy

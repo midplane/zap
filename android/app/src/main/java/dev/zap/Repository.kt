@@ -133,7 +133,8 @@ class Repository(private val context: Context) {
             require(code.startsWith("zap://pair#")) { "Scan the pairing code shown in Zap on Mac." }
             val pairing = JSONObject(String(java.util.Base64.getUrlDecoder().decode(code.substringAfter('#'))))
             val url = pairing.getString("url").trimEnd('/')
-            require(Uri.parse(url).scheme == "https") { "Pairing requires an HTTPS server." }
+            val endpoint = Uri.parse(url)
+            require(endpoint.scheme == "https" || (BuildConfig.DEBUG && endpoint.scheme == "http" && endpoint.host in listOf("localhost", "127.0.0.1"))) { "Pairing requires an HTTPS server." }
             val keys = pairing.getJSONObject("keys"); val keyId = pairing.getString("keyId"); val public = identity.state.getString("public").unb64()
             val envelopes = JSONObject()
             keys.keys().forEach { id -> envelopes.put(id, Crypto.wrap(keys.getString(id).unb64(), public, id)) }
@@ -144,6 +145,25 @@ class Repository(private val context: Context) {
         }
         sync(); if (active) connectSocket()
     }
+    suspend fun invite(): String = withContext(Dispatchers.IO) {
+        sync()
+        mutex.withLock {
+            val token = JSONObject(String(request("/v1/invitations", "POST"))).getString("token")
+            val code = JSONObject().put("url", identity.state.getString("url")).put("token", token).put("keyId", identity.state.getString("keyId")).put("keys", identity.keys)
+            "zap://pair#" + java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(code.toString().toByteArray())
+        }
+    }
+    suspend fun disconnect() = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            socket?.close(1000, null); socket = null; reconnect?.cancel()
+            for (clip in clips.value) save(clip.copy(pending = true))
+            for (id in dao.deletions()) dao.deleted(id)
+            identity.state.put("url", "").put("token", "").put("deviceId", "").put("keyId", "").put("keys", JSONObject())
+            identity.save(); connected.value = false; cursor = -1; devices.value = emptyList()
+            prefs.edit().remove("clearPending").putBoolean("daysPending", true).commit()
+            status.value = "Local history"; error.value = null; refresh()
+        }
+    }
     suspend fun removeDevice(deviceId: String) = withContext(Dispatchers.IO) {
         mutex.withLock {
             val key = Crypto.randomKey(); val keyId = UUID.randomUUID().toString(); val envelopes = JSONObject()
@@ -153,10 +173,10 @@ class Repository(private val context: Context) {
         }; sync()
     }
     suspend fun sync(): Boolean = withContext(Dispatchers.IO) {
-        if (!identity.connected) return@withContext true
         mutex.withLock {
             try {
                 refresh()
+                if (!identity.connected) return@withLock true
                 if (prefs.getBoolean("clearPending", false)) { request("/v1/items", "DELETE"); prefs.edit().remove("clearPending").commit() }
                 for (id in dao.deletions()) { request("/v1/items/$id", "DELETE"); dao.deleted(id) }
                 if (prefs.getBoolean("daysPending", false)) { request("/v1/settings", "PUT", JSONObject().put("days", days.value).toString().toByteArray()); prefs.edit().remove("daysPending").commit() }
