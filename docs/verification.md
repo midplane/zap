@@ -25,12 +25,19 @@ The Mac build script now bypasses the broken SwiftPM manifest linker on this mac
 ./scripts/build-mac.sh
 ./scripts/check-mac-crypto.sh
 ./scripts/check-mac-clipboard.sh
+./scripts/check-mac-store.sh
 (cd android && ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:lintDebug)
 ```
 
 Android lint warnings include available dependency upgrades, the annotation processor, backup configuration, and synchronous preference writes on IO threads. The advisory recheck is pending: internal-registry authentication and automatic approval review prevented completing it. Do not interpret passing builds as a clean dependency audit.
 
 Mac clipboard checks use a separate pasteboard to verify Finder image-file copying (the image rather than its file icon), direct PNG/TIFF data, and ignoring icons on non-image files. They require access to macOS pasteboard services.
+
+Store checks verify cached payload replacement, pending-state updates, removal, expiry, and reopening encrypted storage. In one local run with eight synthetic 1 MiB payloads, a cold load took 31.91 ms and cached metadata reloads averaged 0.01 ms. This is a focused work-reduction check, not a battery measurement. Android's sync-request test verifies that a burst during a running sync produces one follow-up without dropping a later request.
+
+Idle sync now uses Mac live notifications with a five-minute fallback, bounded reconnect delays on both apps, and Android periodic jobs only while paired and battery is not low. User-triggered sends still request immediate work. Device battery impact and cold-start memory use remain unmeasured.
+
+The updated Mac app reached “Up to date” from `/Applications`. The updated Android app launched on the emulator in local-only mode with zero registered Zap background jobs. No physical phone was connected for this pass.
 
 ## Not established
 

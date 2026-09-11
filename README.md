@@ -10,7 +10,7 @@ On Mac, copy text or an image as usual. Open Zap with **⌥Space (Option+Space)*
 
 On Android, **share text or an image to Zap**, or open Zap and choose **Add from clipboard**. Tap an item to preview, copy, share, or delete it. Android does not allow ordinary apps to watch the clipboard in the background. New items enter history without overwriting your current clipboard.
 
-Both apps work locally without a server. Android refreshes when opened; background refresh is opportunistic. Pending shares retry through WorkManager. Mac stays connected while running. Settings control retention from 1 to 365 days, default 10.
+Both apps work locally without a server. Android refreshes when opened; while connected, it requests background refresh every 15 minutes when the network is available and battery is not low. Android may delay that work. Pending shares retry through WorkManager. Mac uses live change notifications with a five-minute fallback check. Both apps back off failed live connections and reuse loaded history during sync. Settings control retention from 1 to 365 days, default 10.
 
 ## Build
 
@@ -73,6 +73,7 @@ npm run check
 npm test
 cd ..
 ./scripts/check-mac-crypto.sh
+./scripts/check-mac-store.sh
 cd android
 ./gradlew testDebugUnitTest assembleDebug
 ```
