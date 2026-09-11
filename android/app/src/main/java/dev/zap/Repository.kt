@@ -65,6 +65,7 @@ class Repository(private val context: Context) {
     }
     private suspend fun removeLocal(id: String) { dao.remove(id); File(directory, id).delete() }
     private suspend fun refresh() {
+        File(context.cacheDir, "shared").listFiles()?.filter { System.currentTimeMillis() - it.lastModified() > 3_600_000 }?.forEach { it.delete() }
         val cutoff = System.currentTimeMillis() - days.value * 86_400_000L
         val stored = dao.all()
         for (clip in stored.filter { it.createdAt <= cutoff }) removeLocal(clip.id)
@@ -83,7 +84,17 @@ class Repository(private val context: Context) {
         add(JSONObject().put("kind", "text").put("text", text))
     }
     suspend fun addImage(uri: Uri) = withContext(Dispatchers.IO) {
-        val data = context.contentResolver.openInputStream(uri)?.use { it.readNBytes(20 * 1024 * 1024 + 1) } ?: error("Image could not be opened")
+        val data = context.contentResolver.openInputStream(uri)?.use { input ->
+            val output = java.io.ByteArrayOutputStream()
+            val buffer = ByteArray(8192)
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                require(output.size() + count <= 20 * 1024 * 1024) { "Image is too large. Maximum: 20 MiB." }
+                output.write(buffer, 0, count)
+            }
+            output.toByteArray()
+        } ?: error("Image could not be opened")
         require(data.size <= 20 * 1024 * 1024) { "Image is too large. Maximum: 20 MiB." }
         val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }; BitmapFactory.decodeByteArray(data, 0, data.size, options)
         require(options.outWidth > 0 && options.outHeight > 0 && options.outWidth.toLong() * options.outHeight <= 40_000_000) { "Use a static image up to 40 megapixels." }
