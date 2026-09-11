@@ -2,9 +2,13 @@ import AppKit
 import SwiftUI
 import Carbon
 
-@main struct ZapApp: App {
-    @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
-    var body: some Scene { Settings { EmptyView() } }
+@main struct ZapApp {
+    @MainActor static func main() {
+        let application = NSApplication.shared
+        let delegate = AppDelegate()
+        application.delegate = delegate
+        withExtendedLifetime(delegate) { application.run() }
+    }
 }
 @MainActor final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var model: Model!
@@ -24,9 +28,6 @@ import Carbon
         menuItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         menuItem.button?.image = NSImage(systemSymbolName: "clipboard", accessibilityDescription: "Zap clipboard history")
         menuItem.button?.target = self; menuItem.button?.action = #selector(toggle)
-        let menu = NSMenu(); menu.addItem(withTitle: "Open history", action: #selector(toggle), keyEquivalent: "")
-        menu.addItem(.separator()); menu.addItem(withTitle: "Quit Zap", action: #selector(quit), keyEquivalent: "q")
-        for item in menu.items { item.target = self }
         menuItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
         model.dismiss = { [weak self] in self?.window.orderOut(nil) }
         model.paste = { [weak self] in self?.pasteSelection() }
@@ -37,7 +38,7 @@ import Carbon
             Task { @MainActor in delegate.toggle() }; return noErr
         }, 1, &event, Unmanaged.passUnretained(self).toOpaque(), nil)
         registerShortcut()
-        NotificationCenter.default.addObserver(forName: .init("ZapShortcutChanged"), object: nil, queue: .main) { [weak self] _ in Task { @MainActor in self?.registerShortcut() } }
+        NotificationCenter.default.addObserver(forName: .init("ZapShortcutChanged"), object: nil, queue: .main) { [weak self] _ in guard let self else { return }; Task { @MainActor in self.registerShortcut() } }
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, self.window.isKeyWindow, !self.model.settingsOpen, self.model.preview == nil else { return event }
             switch event.keyCode {
@@ -53,6 +54,8 @@ import Carbon
         model.start()
         if !UserDefaults.standard.bool(forKey: "hasOpened") { toggle(); UserDefaults.standard.set(true, forKey: "hasOpened") }
     }
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { show(); return true }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func registerShortcut() {
         if let hotkey { UnregisterEventHotKey(hotkey) }
         let choice = UserDefaults.standard.string(forKey: "shortcut") ?? "v"

@@ -44,7 +44,9 @@ final class Store {
     deinit { sqlite3_close(db) }
     private func execute(_ sql: String, _ args: [String] = []) throws {
         let statement = try prepare(sql, args); defer { sqlite3_finalize(statement) }
-        guard sqlite3_step(statement) == SQLITE_DONE else { throw ZapError("Could not save local history.") }
+        var result = sqlite3_step(statement)
+        while result == SQLITE_ROW { result = sqlite3_step(statement) }
+        guard result == SQLITE_DONE else { throw ZapError("Could not save local history.") }
     }
     private func prepare(_ sql: String, _ args: [String]) throws -> OpaquePointer {
         var statement: OpaquePointer?

@@ -51,8 +51,8 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
     var selected: Clip? { filtered.first(where: { $0.id == selection }) ?? filtered.first }
     var pendingCount: Int { clips.filter(\.pending).count }
     func start() {
-        timer = Timer.scheduledTimer(withTimeInterval: 0.65, repeats: true) { [weak self] _ in Task { @MainActor in self?.capture() } }
-        syncTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in Task { @MainActor in await self?.sync() } }
+        timer = Timer.scheduledTimer(withTimeInterval: 0.65, repeats: true) { [weak self] _ in guard let self else { return }; Task { @MainActor in self.capture() } }
+        syncTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in guard let self else { return }; Task { @MainActor in await self.sync() } }
         Task { await sync(); connectSocket() }
     }
     func persist() throws { try VaultCrypto.saveSecret(JSONEncoder().encode(identity)) }
