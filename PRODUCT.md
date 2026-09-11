@@ -1,7 +1,5 @@
 # Zap
 
-<!-- impeccable:product-schema 1 -->
-
 ## Platform
 
 adaptive
