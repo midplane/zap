@@ -9,12 +9,15 @@
     "test": "node --import tsx --test test/*.test.ts"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20250906.0",
+    "@cloudflare/workers-types": "5.20260730.1",
     "@types/node": "^22.0.0",
+    "esbuild": "0.28.2",
+    "miniflare": "4.20260730.0",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0",
-    "wrangler": "^4.35.0",
-    "miniflare": "4.20250906.0",
-    "esbuild": "0.25.4"
+    "wrangler": "4.116.0"
+  },
+  "overrides": {
+    "sharp": "0.35.4"
   }
 }
