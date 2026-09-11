@@ -11,6 +11,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -22,14 +24,19 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.colorResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
@@ -48,8 +55,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState); enableEdgeToEdge()
         if (savedInstanceState == null) receive(intent)
         setContent {
-            val dark = androidx.compose.foundation.isSystemInDarkTheme()
-            MaterialTheme(colorScheme = if (dark) darkColorScheme(primary = Color(0xFFA8C7FA), primaryContainer = Color(0xFF173E78), onPrimaryContainer = Color(0xFFDCE8FF), secondaryContainer = Color(0xFF343D4B), onSecondaryContainer = Color(0xFFE0E6F0), surface = Color(0xFF121419), background = Color(0xFF121419)) else lightColorScheme(primary = Color(0xFF245AC5), primaryContainer = Color(0xFFDCE8FF), onPrimaryContainer = Color(0xFF123A73), secondaryContainer = Color(0xFFE6EAF1), onSecondaryContainer = Color(0xFF394453), surface = Color(0xFFFAFAFC), background = Color(0xFFFAFAFC))) {
+            ZapTheme {
                 ZapScreen(repo, incomingPair, { incomingPair = null }, incomingShare, { finish() })
             }
         }
@@ -76,10 +82,10 @@ class MainActivity : ComponentActivity() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable fun ZapScreen(repo: Repository, incomingPair: String?, onPairConsumed: () -> Unit, incomingShare: Boolean, finishShare: () -> Unit) {
-    val clips by repo.clips.collectAsState()
-    val status by repo.status.collectAsState()
-    val error by repo.error.collectAsState()
-    val connected by repo.connected.collectAsState()
+    val clips by repo.clips.collectAsStateWithLifecycle()
+    val status by repo.status.collectAsStateWithLifecycle()
+    val error by repo.error.collectAsStateWithLifecycle()
+    val connected by repo.connected.collectAsStateWithLifecycle()
     var search by remember { mutableStateOf("") }
     var filter by remember { mutableStateOf("All") }
     var settings by remember { mutableStateOf(false) }
@@ -97,12 +103,21 @@ class MainActivity : ComponentActivity() {
     BackHandler(settings) { settings = false }
     Scaffold(
         topBar = {
-            TopAppBar(title = { Text(if (settings) "Settings" else "Zap", style = MaterialTheme.typography.headlineSmall) }, navigationIcon = {
+            TopAppBar(title = {
+                if (settings) Text("Settings", style = MaterialTheme.typography.headlineSmall)
+                else Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Image(painterResource(R.drawable.ic_zap_foreground), null, Modifier.size(44.dp).background(colorResource(R.color.zap_icon_background), RoundedCornerShape(12.dp)))
+                    Column {
+                        Text("Zap", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+                        Text("Clipboard history", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }, navigationIcon = {
                 if (settings) IconButton(onClick = { settings = false }) { Icon(Icons.Outlined.ArrowBack, "Back") }
             }, actions = {
                 if (!settings) {
                     if (incomingShare) TextButton(onClick = finishShare) { Text("Done") }
-                    IconButton(onClick = { settings = true }) { Icon(Icons.Outlined.Settings, "Settings") }
+                    FilledTonalIconButton(onClick = { settings = true }) { Icon(Icons.Outlined.Settings, "Settings") }
                 }
             })
         },
@@ -188,10 +203,10 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable private fun SettingsContent(repo: Repository, onScan: () -> Unit, onManual: () -> Unit, onAction: (suspend () -> Unit) -> Unit) {
-    val days by repo.days.collectAsState()
-    val connected by repo.connected.collectAsState()
-    val devices by repo.devices.collectAsState()
-    val status by repo.status.collectAsState()
+    val days by repo.days.collectAsStateWithLifecycle()
+    val connected by repo.connected.collectAsStateWithLifecycle()
+    val devices by repo.devices.collectAsStateWithLifecycle()
+    val status by repo.status.collectAsStateWithLifecycle()
     var retention by remember(days) { mutableStateOf(days.toString()) }
     var clearing by remember { mutableStateOf(false) }
     var disconnecting by remember { mutableStateOf(false) }
@@ -230,15 +245,28 @@ class MainActivity : ComponentActivity() {
             }
         }
         if (connected) item {
-            TextButton(onClick = { onAction { repo.sync() } }) { Text("Sync now") }
-            TextButton(onClick = { onAction { invitation = repo.invite() } }) { Text("Pair another device") }
-            TextButton(onClick = { disconnecting = true }) { Text("Disconnect") }
+            Column {
+                SettingsAction("Sync now", "Send pending items and check for new history", Icons.Outlined.Sync) { onAction { repo.sync() } }
+                HorizontalDivider()
+                SettingsAction("Pair another device", "Create a private code for your Mac or phone", Icons.Outlined.QrCodeScanner) { onAction { invitation = repo.invite() } }
+                HorizontalDivider()
+                SettingsAction("Disconnect", "Keep local history on this phone", Icons.Outlined.LinkOff) { disconnecting = true }
+            }
         }
     }
     invitation?.let { code -> AlertDialog(onDismissRequest = { invitation = null }, title = { Text("Pair another device") }, text = { Text("Copy this private code and enter it in Zap on the new device. It expires in five minutes.") }, confirmButton = { TextButton(onClick = { context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Pairing code", code)); invitation = null }) { Text("Copy code") } }, dismissButton = { TextButton(onClick = { invitation = null }) { Text("Cancel") } }) }
     if (disconnecting) AlertDialog(onDismissRequest = { disconnecting = false }, title = { Text("Disconnect?") }, text = { Text("Local history stays on this phone and will upload when you connect again.") }, confirmButton = { TextButton(onClick = { disconnecting = false; onAction { repo.disconnect() } }) { Text("Disconnect") } }, dismissButton = { TextButton(onClick = { disconnecting = false }) { Text("Cancel") } })
     if (clearing) AlertDialog(onDismissRequest = { clearing = false }, title = { Text("Clear history?") }, text = { Text(if (connected) "History will be deleted on all connected devices when they sync." else "History will be deleted from this phone.") }, confirmButton = { TextButton(onClick = { clearing = false; onAction { repo.clear() } }) { Text("Clear history") } }, dismissButton = { TextButton(onClick = { clearing = false }) { Text("Cancel") } })
     remove?.let { id -> AlertDialog(onDismissRequest = { remove = null }, title = { Text("Remove this device?") }, text = { Text("It will no longer receive new items. Content already downloaded remains on that device.") }, confirmButton = { TextButton(onClick = { remove = null; onAction { repo.removeDevice(id) } }) { Text("Remove") } }, dismissButton = { TextButton(onClick = { remove = null }) { Text("Cancel") } }) }
+}
+
+@Composable private fun SettingsAction(title: String, description: String, icon: ImageVector, onClick: () -> Unit) {
+    ListItem(
+        headlineContent = { Text(title) },
+        supportingContent = { Text(description) },
+        leadingContent = { Icon(icon, null, tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+        modifier = Modifier.fillMaxWidth().clickable(role = Role.Button, onClick = onClick).padding(vertical = 4.dp)
+    )
 }
 
 @Composable private fun ClipImage(clip: Clip, modifier: Modifier) {
