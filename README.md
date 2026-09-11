@@ -4,7 +4,7 @@ Private clipboard history for Mac and Android. Native apps, ten days of history 
 
 ## Daily use
 
-On Mac, copy text or an image as usual. Open Zap with **⌥C (Option+C)**, search, and press **Enter** to paste. Arrows select; Space previews when search is empty; ⌘C copies. Use the menu-bar icon for settings and startup options. Direct paste needs macOS Accessibility permission.
+On Mac, copy text or an image as usual. Open Zap with **⌥Space (Option+Space)**, search, and press **Enter** to paste. Arrows select; Space previews when search is empty; ⌘C copies. Use the menu-bar icon for settings and startup options. Direct paste needs macOS Accessibility permission.
 
 On Android, **share text or an image to Zap**, or open Zap and choose **Add from clipboard**. Tap an item to preview, copy, share, or delete it. Android does not allow ordinary apps to watch the clipboard in the background. New items enter history without overwriting your current clipboard.
 
