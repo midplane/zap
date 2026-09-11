@@ -35,9 +35,14 @@ struct HistoryView: View {
             Divider()
             if model.filtered.isEmpty {
                 ContentUnavailableView {
-                    Label(model.query.isEmpty ? (model.filter == "All" ? "Your clipboard, remembered" : "No \(model.filter.lowercased()) yet") : "No matches", systemImage: model.query.isEmpty ? "clipboard" : "magnifyingglass")
+                    Label {
+                        Text(model.query.isEmpty ? (model.filter == "All" ? "Your clipboard, remembered" : "No \(model.filter.lowercased()) yet") : "No matches").foregroundStyle(Color.primary)
+                    } icon: {
+                        if model.query.isEmpty && model.filter == "All" { Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 56, height: 56) }
+                        else { Image(systemName: model.query.isEmpty ? "clipboard" : "magnifyingglass").foregroundStyle(Color.zapSecondary) }
+                    }
                 } description: {
-                    Text(model.query.isEmpty ? "Copy text or an image to get started.\nYour history stays here for \(model.days) days." : "Try another word or switch the content filter.")
+                    Text(model.query.isEmpty ? "Copy text or an image to get started.\nYour history stays here for \(model.days) days." : "Try another word or switch the content filter.").foregroundStyle(Color.zapSecondary)
                 }.frame(maxHeight: .infinity)
             } else {
                 ScrollViewReader { proxy in
