@@ -3,20 +3,34 @@ import AppKit
 import CoreImage.CIFilterBuiltins
 import ServiceManagement
 
+private extension Color {
+    static let zapSecondary = Color(nsColor: NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(white: 0.75, alpha: 1)
+            : NSColor(white: 0.34, alpha: 1)
+    })
+}
+
 struct HistoryView: View {
     @ObservedObject var model: Model
     @FocusState private var searchFocused: Bool
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
-                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                TextField("Search clipboard history", text: $model.query).textFieldStyle(.plain).font(.title3).focused($searchFocused)
+                Image(systemName: "magnifyingglass").foregroundStyle(Color.zapSecondary)
+                TextField("", text: $model.query).textFieldStyle(.plain).font(.title3).focused($searchFocused)
+                    .accessibilityLabel("Search clipboard history")
+                    .overlay(alignment: .leading) {
+                        if model.query.isEmpty {
+                            Text("Search clipboard history").font(.title3).foregroundStyle(Color.zapSecondary).allowsHitTesting(false).accessibilityHidden(true)
+                        }
+                    }
                 Button { model.settingsOpen = true } label: { Image(systemName: "gearshape") }.buttonStyle(.plain).help("Settings").accessibilityLabel("Settings")
             }.padding(20)
             HStack {
                 Picker("Content", selection: $model.filter) { ForEach(["All", "Text", "Images"], id: \.self) { Text($0) } }.pickerStyle(.segmented).labelsHidden().frame(width: 220)
                 Spacer()
-                Text(model.filtered.count == 1 ? "1 item" : "\(model.filtered.count) items").font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                Text(model.filtered.count == 1 ? "1 item" : "\(model.filtered.count) items").font(.caption).foregroundStyle(Color.zapSecondary).monospacedDigit()
             }.padding(.horizontal, 20).padding(.bottom, 12)
             Divider()
             if model.filtered.isEmpty {
@@ -29,7 +43,7 @@ struct HistoryView: View {
                 ScrollViewReader { proxy in
                     List(selection: $model.selection) {
                         ForEach(model.filtered) { clip in
-                            ClipRow(clip: clip).tag(clip.id)
+                            ClipRow(clip: clip, selected: model.selection == clip.id).tag(clip.id)
                                 .contextMenu {
                                     Button("Copy") { model.copy(clip) }
                                     Button("Preview") { model.preview = clip }
@@ -54,8 +68,8 @@ struct HistoryView: View {
                 Circle().fill(model.status == "Up to date" ? Color.green : Color.secondary).frame(width: 5, height: 5)
                 Text(model.pendingCount > 0 && model.connected ? "\(model.pendingCount) pending" : model.status)
                 Spacer()
-                Text("↑↓ navigate    Space preview    ↵ paste").foregroundStyle(.secondary)
-            }.font(.caption).foregroundStyle(.secondary).padding(.horizontal, 20).padding(.vertical, 12)
+                Text("↑↓ navigate    Space preview    ↵ paste").foregroundStyle(Color.zapSecondary)
+            }.font(.caption).foregroundStyle(Color.zapSecondary).padding(.horizontal, 20).padding(.vertical, 12)
         }.frame(minWidth: 580, minHeight: 420).background(.background)
         .onAppear { searchFocused = true }
         .onChange(of: model.query) { _, _ in model.selection = model.filtered.first?.id }
@@ -66,12 +80,13 @@ struct HistoryView: View {
 }
 struct ClipRow: View {
     let clip: Clip
+    var selected = false
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             Group {
                 if clip.payload.kind == "image", let image = clipImage(clip) {
                     Image(nsImage: image).resizable().aspectRatio(contentMode: .fit)
-                } else { Image(systemName: "text.alignleft").font(.title3).foregroundStyle(.secondary) }
+                } else { Image(systemName: "text.alignleft").font(.title3).foregroundStyle(Color.zapSecondary) }
             }.frame(width: 44, height: 44).background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
             VStack(alignment: .leading, spacing: 5) {
                 Text(clip.payload.kind == "image" ? "Image" : clip.payload.text ?? "").font(.body).lineLimit(3).frame(maxWidth: .infinity, alignment: .leading)
@@ -80,7 +95,7 @@ struct ClipRow: View {
                     Text("·")
                     Text(clip.date, style: .relative)
                     if clip.pending { Image(systemName: "arrow.triangle.2.circlepath").accessibilityLabel("Pending sync") }
-                }.font(.caption).foregroundStyle(.secondary)
+                }.font(.caption).foregroundStyle(selected ? Color.primary : Color.zapSecondary)
             }
         }.padding(.vertical, 8).accessibilityElement(children: .combine)
     }
@@ -103,7 +118,7 @@ struct PreviewView: View {
                     Image(nsImage: image).resizable().aspectRatio(contentMode: .fit)
                 } else { Text(clip.payload.text ?? "").textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
             }
-            HStack { Text(clip.date.formatted()).font(.caption).foregroundStyle(.secondary); Spacer(); Button("Copy") { model.copy(clip); dismiss() }.keyboardShortcut(.defaultAction) }
+            HStack { Text(clip.date.formatted()).font(.caption).foregroundStyle(Color.zapSecondary); Spacer(); Button("Copy") { model.copy(clip); dismiss() }.keyboardShortcut(.defaultAction) }
         }.padding(24).frame(width: 540, height: 420)
     }
 }
@@ -136,7 +151,7 @@ struct SettingsView: View {
                 }
                 Section(model.connected ? "Connected devices" : "Connect your server") {
                     if model.connected {
-                        Text(model.identity.url).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                        Text(model.identity.url).font(.caption).foregroundStyle(Color.zapSecondary).textSelection(.enabled)
                         ForEach(model.devices) { device in
                             HStack { Label(device.name, systemImage: device.id == model.identity.deviceId ? "desktopcomputer" : "iphone"); Spacer()
                                 if device.id != model.identity.deviceId { Button("Remove", role: .destructive) { Task { await model.removeDevice(device) } } }
@@ -146,7 +161,7 @@ struct SettingsView: View {
                         Button("Sync now") { Task { await model.sync(force: true) } }
                         Button("Disconnect…") { disconnecting = true }
                     } else {
-                        Text("Deploy Zap to your Cloudflare account, then enter the URL and setup token printed by the deployment script.").foregroundStyle(.secondary)
+                        Text("Deploy Zap to your Cloudflare account, then enter the URL and setup token printed by the deployment script.").foregroundStyle(Color.zapSecondary)
                         TextField("Server URL", text: $url, prompt: Text("https://zap.your-account.workers.dev"))
                         SecureField("Setup token", text: $token)
                         Button(busy ? "Connecting…" : "Connect") { busy = true; Task { await model.setup(url: url, token: token); busy = false; if model.connected { token = "" } } }.disabled(busy || url.isEmpty || token.isEmpty)
@@ -161,7 +176,7 @@ struct SettingsView: View {
                     if let image = qrImage(code) { Image(nsImage: image).interpolation(.none).resizable().frame(width: 190, height: 190).padding(8).background(.white).accessibilityLabel("Android pairing QR code") }
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Open Zap on Android").font(.headline)
-                        Text("Choose Scan pairing code.\nThis code expires in five minutes.").foregroundStyle(.secondary)
+                        Text("Choose Scan pairing code.\nThis code expires in five minutes.").foregroundStyle(Color.zapSecondary)
                         Button("Copy pairing code") {
                             let board = NSPasteboard.general; board.clearContents(); board.setString(code, forType: .string)
                             model.ignoreCurrentClipboard()

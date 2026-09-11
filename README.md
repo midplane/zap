@@ -41,6 +41,8 @@ The script provisions `zap-content` in R2, deploys the Worker/Durable Object, an
 2. Choose **Pair Android**. On Android, open Settings → **Scan pairing code**.
 3. Confirm the connection on the phone. QR invitations expire after five minutes and can be used once. The code contains encryption keys; keep it private. Manual code entry is available if scanning is inconvenient.
 
+An existing phone can create a code with **Pair another device**. On a replacement Mac, use **Join existing history**. **Disconnect** forgets the server connection while retaining local history; that history uploads when you connect to another server.
+
 One deployment is one personal device group. No login service, public sharing links, push provider, or paid Zap subscription. Cloudflare usage is billed to your account.
 
 ## Verification
