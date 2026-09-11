@@ -32,9 +32,10 @@ struct Identity: Codable {
 final class Store {
     private var db: OpaquePointer?
     private let localKey: Data
-    init(key: Data) throws {
+    private var cached: [String: Payload] = [:]
+    init(key: Data, directory: URL? = nil) throws {
         localKey = key
-        let directory = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true).appendingPathComponent("dev.midplane.zap")
+        let directory = try directory ?? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true).appendingPathComponent("dev.midplane.zap")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         guard sqlite3_open(directory.appendingPathComponent("history.sqlite").path, &db) == SQLITE_OK else { throw ZapError("Could not open local history.") }
         try execute("PRAGMA journal_mode=WAL")
@@ -63,20 +64,28 @@ final class Store {
         return result
     }
     func all() throws -> [Clip] {
-        try rows("SELECT id,payload,pending FROM clips ORDER BY created DESC").map { row in
-            guard let encrypted = Data(base64Encoded: row[1]) else { throw ZapError("Local history is damaged.") }
-            let payload = try JSONDecoder().decode(Payload.self, from: VaultCrypto.open(encrypted, key: localKey, aad: row[0]))
-            return Clip(id: row[0], payload: payload, pending: row[2] == "1")
+        let records = try rows("SELECT id,pending FROM clips ORDER BY created DESC")
+        let ids = Set(records.map { $0[0] }); cached = cached.filter { ids.contains($0.key) }
+        return try records.map { row in
+            let id = row[0]
+            if cached[id] == nil {
+                guard let value = try rows("SELECT payload FROM clips WHERE id=?", [id]).first?.first, let encrypted = Data(base64Encoded: value) else { throw ZapError("Local history is damaged.") }
+                cached[id] = try JSONDecoder().decode(Payload.self, from: VaultCrypto.open(encrypted, key: localKey, aad: id))
+            }
+            guard let payload = cached[id] else { throw ZapError("Could not load local history.") }
+            return Clip(id: id, payload: payload, pending: row[1] == "1")
         }
     }
     func save(_ clip: Clip) throws {
         let encrypted = try VaultCrypto.seal(JSONEncoder().encode(clip.payload), key: localKey, aad: clip.id)
         try execute("INSERT OR REPLACE INTO clips VALUES(?,?,?,?)", [clip.id, String(clip.payload.createdAt), encrypted.base64EncodedString(), clip.pending ? "1" : "0"])
+        cached[clip.id] = clip.payload
     }
     func sent(_ id: String) throws { try execute("UPDATE clips SET pending=0 WHERE id=?", [id]) }
     func remove(_ id: String, queue: Bool = false) throws {
         if queue { try execute("INSERT OR IGNORE INTO deletions VALUES(?)", [id]) }
         try execute("DELETE FROM clips WHERE id=?", [id])
+        cached.removeValue(forKey: id)
     }
     func deletions() throws -> [String] { try rows("SELECT id FROM deletions").map { $0[0] } }
     func deleted(_ id: String) throws { try execute("DELETE FROM deletions WHERE id=?", [id]) }
