@@ -11,7 +11,7 @@ struct HistoryView: View {
             HStack(spacing: 12) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                 TextField("Search clipboard history", text: $model.query).textFieldStyle(.plain).font(.title3).focused($searchFocused)
-                Button { model.settingsOpen = true } label: { Image(systemName: "gearshape") }.buttonStyle(.plain).help("Settings")
+                Button { model.settingsOpen = true } label: { Image(systemName: "gearshape") }.buttonStyle(.plain).help("Settings").accessibilityLabel("Settings")
             }.padding(20)
             HStack {
                 Picker("Content", selection: $model.filter) { ForEach(["All", "Text", "Images"], id: \.self) { Text($0) } }.pickerStyle(.segmented).labelsHidden().frame(width: 220)
@@ -147,7 +147,7 @@ struct SettingsView: View {
                         Button("Disconnect…") { disconnecting = true }
                     } else {
                         Text("Deploy Zap to your Cloudflare account, then enter the URL and setup token printed by the deployment script.").foregroundStyle(.secondary)
-                        TextField("https://zap.your-account.workers.dev", text: $url)
+                        TextField("Server URL", text: $url, prompt: Text("https://zap.your-account.workers.dev"))
                         SecureField("Setup token", text: $token)
                         Button(busy ? "Connecting…" : "Connect") { busy = true; Task { await model.setup(url: url, token: token); busy = false; if model.connected { token = "" } } }.disabled(busy || url.isEmpty || token.isEmpty)
                         Divider()

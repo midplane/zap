@@ -18,6 +18,15 @@ import Carbon
     private var previousApp: NSRunningApplication?
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        let mainMenu = NSMenu()
+        let appMenu = NSMenu(); appMenu.addItem(withTitle: "Quit Zap", action: #selector(quit), keyEquivalent: "q").target = self
+        let appItem = mainMenu.addItem(withTitle: "Zap", action: nil, keyEquivalent: ""); appItem.submenu = appMenu
+        let editMenu = NSMenu(title: "Edit")
+        for (title, action, key) in [("Undo", "undo:", "z"), ("Cut", "cut:", "x"), ("Copy", "copy:", "c"), ("Paste", "paste:", "v"), ("Select All", "selectAll:", "a")] {
+            editMenu.addItem(withTitle: title, action: Selector(action), keyEquivalent: key)
+        }
+        mainMenu.addItem(withTitle: "Edit", action: nil, keyEquivalent: "").submenu = editMenu
+        NSApp.mainMenu = mainMenu
         do { model = try Model() } catch {
             let alert = NSAlert(); alert.messageText = "Zap couldn’t open"; alert.informativeText = error.localizedDescription; alert.runModal(); NSApp.terminate(nil); return
         }
