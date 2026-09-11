@@ -132,7 +132,7 @@ struct SettingsView: View {
     @State private var disconnecting = false
     @State private var clearing = false
     @State private var startup = SMAppService.mainApp.status == .enabled
-    @State private var shortcut = UserDefaults.standard.string(forKey: "shortcut") ?? "v"
+    @State private var shortcut = UserDefaults.standard.string(forKey: "shortcut") ?? "option-c"
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             HStack { Text("Settings").font(.title2.weight(.semibold)); Spacer(); Button("Done") { model.pairingCode = nil; dismiss() }.keyboardShortcut(.cancelAction) }
@@ -146,7 +146,7 @@ struct SettingsView: View {
                         do { if value { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() } }
                         catch { model.error = error.localizedDescription; startup = SMAppService.mainApp.status == .enabled }
                     }
-                    Picker("Shortcut", selection: $shortcut) { Text("⇧⌘V").tag("v"); Text("⇧⌘C").tag("c"); Text("⇧⌘Space").tag("space") }
+                    Picker("Shortcut", selection: $shortcut) { Text("⌥C").tag("option-c"); Text("⇧⌘V").tag("v"); Text("⇧⌘C").tag("c"); Text("⇧⌘Space").tag("space") }
                         .onChange(of: shortcut) { _, value in UserDefaults.standard.set(value, forKey: "shortcut"); NotificationCenter.default.post(name: .init("ZapShortcutChanged"), object: nil) }
                 }
                 Section(model.connected ? "Connected devices" : "Connect your server") {

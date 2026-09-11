@@ -67,9 +67,10 @@ import Carbon
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func registerShortcut() {
         if let hotkey { UnregisterEventHotKey(hotkey) }
-        let choice = UserDefaults.standard.string(forKey: "shortcut") ?? "v"
-        let code = choice == "space" ? 49 : choice == "c" ? 8 : 9
-        let result = RegisterEventHotKey(UInt32(code), UInt32(cmdKey | shiftKey), EventHotKeyID(signature: 0x5A415020, id: 1), GetApplicationEventTarget(), 0, &hotkey)
+        let choice = UserDefaults.standard.string(forKey: "shortcut") ?? "option-c"
+        let code = choice == "space" ? kVK_Space : choice == "v" ? kVK_ANSI_V : kVK_ANSI_C
+        let modifiers = choice == "option-c" ? optionKey : cmdKey | shiftKey
+        let result = RegisterEventHotKey(UInt32(code), UInt32(modifiers), EventHotKeyID(signature: 0x5A415020, id: 1), GetApplicationEventTarget(), 0, &hotkey)
         if result != noErr { model.error = "This shortcut is already in use. Choose another in Settings." }
     }
     @objc func toggle() {

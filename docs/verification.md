@@ -18,6 +18,7 @@
 - Passed `./scripts/build-mac.sh` using the active Swift 6.1.2 compiler and macOS 15.5 SDK, targeting macOS 14. The optimized arm64 app passed signature verification.
 - Passed Swift shared crypto vector/key-wrapping/tamper check.
 - Passed text and PNG clipboard capture, shortcut opening, search, and Enter-to-paste into a disposable TextEdit document.
+- Rebuilt and restarted with Option+C as the default shortcut; verified it opens and closes the history panel.
 - Passed native setup against local Cloudflare runtime, encrypted upload, and invitation creation.
 - This machine's Command Line Tools have mismatched PackageDescription symbols and duplicate SwiftBridging module definitions. Both Mac scripts now compile directly without SwiftPM and automatically apply a project-local overlay when duplicate module maps match apart from line comments. No system files have been changed, and no prebuilt binary or manual SDK override is required.
 - Passed bounded native Mac light/dark finish review after correcting secondary-text and search-prompt contrast; reviewer scored every identified issue resolved.
