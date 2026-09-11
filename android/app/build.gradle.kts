@@ -5,9 +5,9 @@ plugins {
     id("org.jetbrains.kotlin.kapt")
 }
 android {
-    namespace = "dev.zap"
+    namespace = "dev.midplane.zap"
     compileSdk = 35
-    defaultConfig { applicationId = "dev.zap"; minSdk = 29; targetSdk = 35; versionCode = 1; versionName = "0.1.0"; testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner" }
+    defaultConfig { applicationId = "dev.midplane.zap"; minSdk = 29; targetSdk = 35; versionCode = 1; versionName = "0.1.0"; testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner" }
     buildFeatures { compose = true; buildConfig = true }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }

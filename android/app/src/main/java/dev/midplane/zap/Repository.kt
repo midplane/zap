@@ -1,4 +1,4 @@
-package dev.zap
+package dev.midplane.zap
 
 import android.app.Application
 import android.content.Context

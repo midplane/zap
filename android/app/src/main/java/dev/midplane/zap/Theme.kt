@@ -1,4 +1,4 @@
-package dev.zap
+package dev.midplane.zap
 
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme

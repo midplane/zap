@@ -1,4 +1,4 @@
-package dev.zap
+package dev.midplane.zap
 
 import org.junit.Test
 import org.junit.Assert.*

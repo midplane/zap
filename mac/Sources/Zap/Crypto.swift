@@ -33,14 +33,14 @@ enum VaultCrypto {
     }
     static func loadSecret() throws -> Data? {
         var result: CFTypeRef?
-        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "dev.zap.vault", kSecAttrAccount as String: "identity", kSecReturnData as String: true]
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "dev.midplane.zap.vault", kSecAttrAccount as String: "identity", kSecReturnData as String: true]
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         if status == errSecItemNotFound { return nil }
         guard status == errSecSuccess else { throw ZapError("Unlock your login keychain to open Zap.") }
         return result as? Data
     }
     static func saveSecret(_ data: Data) throws {
-        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "dev.zap.vault", kSecAttrAccount as String: "identity"]
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "dev.midplane.zap.vault", kSecAttrAccount as String: "identity"]
         let status = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
         if status == errSecItemNotFound {
             var insert = query; insert[kSecValueData as String] = data

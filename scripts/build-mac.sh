@@ -11,7 +11,7 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-<key>CFBundleIdentifier</key><string>dev.zap.mac</string>
+<key>CFBundleIdentifier</key><string>dev.midplane.zap</string>
 <key>CFBundleName</key><string>Zap</string>
 <key>CFBundleExecutable</key><string>Zap</string>
 <key>CFBundleIconFile</key><string>Zap</string>

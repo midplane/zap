@@ -34,7 +34,7 @@ final class Store {
     private let localKey: Data
     init(key: Data) throws {
         localKey = key
-        let directory = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true).appendingPathComponent("Zap")
+        let directory = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true).appendingPathComponent("dev.midplane.zap")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         guard sqlite3_open(directory.appendingPathComponent("history.sqlite").path, &db) == SQLITE_OK else { throw ZapError("Could not open local history.") }
         try execute("PRAGMA journal_mode=WAL")

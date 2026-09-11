@@ -1,4 +1,4 @@
-package dev.zap
+package dev.midplane.zap
 
 import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
@@ -73,8 +73,8 @@ object Crypto {
 class Identity(context: Context) {
     private val prefs = context.getSharedPreferences("identity", Context.MODE_PRIVATE)
     private val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-    private val protector: SecretKey = (keyStore.getKey("zap.identity", null) as? SecretKey) ?: KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").apply {
-        init(KeyGenParameterSpec.Builder("zap.identity", KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT).setBlockModes(KeyProperties.BLOCK_MODE_GCM).setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE).build())
+    private val protector: SecretKey = (keyStore.getKey("dev.midplane.zap.identity", null) as? SecretKey) ?: KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").apply {
+        init(KeyGenParameterSpec.Builder("dev.midplane.zap.identity", KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT).setBlockModes(KeyProperties.BLOCK_MODE_GCM).setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE).build())
     }.generateKey()
     val state: JSONObject = prefs.getString("encrypted", null)?.let { JSONObject(String(Crypto.open(it.unb64(), protector, "identity"))) } ?: run {
         val (private, public) = Crypto.identity()
