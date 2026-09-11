@@ -31,6 +31,18 @@ Install `android/app/build/outputs/apk/debug/app-debug.apk` on your phone. Keep 
 
 The Mac scripts compile directly with the active Xcode/Command Line Tools compiler and SDK, keeping the compiler cache in `mac/.build`. If a Command Line Tools upgrade left duplicate SwiftBridging module definitions, the scripts hide the duplicate with a local compiler overlay. System files are unchanged; SwiftPM is not required.
 
+## Package and install
+
+```sh
+./scripts/package.sh
+```
+
+This builds both apps and produces `dist/Zap-macOS-arm64.dmg` (or `x86_64` when built on an Intel Mac) and `dist/Zap-android-debug.apk`.
+
+On Mac, open the DMG, drag Zap into Applications, eject the disk, and launch `/Applications/Zap.app`. Quit Zap before replacing an existing copy. On Android, open the APK and allow installation from that source when prompted, or use `adb install -r dist/Zap-android-debug.apk` with a connected phone.
+
+These are personal-testing packages: the APK uses debug signing, and the DMG contains the locally signed Mac app. Packaging does not add release signing or notarization. Keep the same app identifiers and signing keys for future updates.
+
 ## Deploy and pair
 
 ```sh
