@@ -168,11 +168,12 @@ struct SettingsView: View {
                         Button("Sync now") { Task { await model.sync(force: true) } }
                         Button("Disconnect…") { disconnecting = true }
                     } else {
-                        Text("Deploy Zap to your Cloudflare account, then enter the URL and setup token printed by the deployment script.").foregroundStyle(Color.zapSecondary)
+                        Text("For a new server, enter the URL and setup token from the deployment script. Already using Zap? Join your existing history below.").foregroundStyle(Color.zapSecondary)
                         TextField("Server URL", text: $url, prompt: Text("https://zap.your-account.workers.dev"))
                         SecureField("Setup token", text: $token)
-                        Button(busy ? "Connecting…" : "Connect") { busy = true; Task { await model.setup(url: url, token: token); busy = false; if model.connected { token = "" } } }.disabled(busy || url.isEmpty || token.isEmpty)
+                        Button(busy ? "Connecting…" : "Set up new history") { busy = true; Task { await model.setup(url: url, token: token); busy = false; if model.connected { token = "" } } }.disabled(busy || url.isEmpty || token.isEmpty)
                         Divider()
+                        Text("On a connected phone, open Settings → Pair another device. Paste its code here.").foregroundStyle(Color.zapSecondary)
                         SecureField("Pairing code from another device", text: $joinCode)
                         Button("Join existing history") { busy = true; Task { await model.join(code: joinCode.trimmingCharacters(in: .whitespacesAndNewlines)); busy = false; if model.connected { joinCode = "" } } }.disabled(busy || joinCode.isEmpty)
                     }

@@ -136,6 +136,8 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
             identity.url = endpoint; identity.token = auth.token; identity.deviceId = auth.deviceId
             try persist(); connected = true; error = nil; retryAt = .distantPast
             await sync(); connectSocket()
+        } catch let error as APIError where error.status == 409 {
+            self.error = "This server already has a history. Get a pairing code from a connected device, then choose Join existing history."
         } catch { self.error = error.localizedDescription }
     }
     func disconnect() {

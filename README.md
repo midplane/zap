@@ -49,6 +49,8 @@ The script provisions `zap-content` in R2, deploys the Worker/Durable Object, an
 
 An existing phone can create a code with **Pair another device**. On a replacement Mac, use **Join existing history**. **Disconnect** forgets the server connection while retaining local history; that history uploads when you connect to another server.
 
+The setup token initializes a server once. If you see “This deployment is already initialized,” join using a pairing code from a connected device. This also applies after changing the app identifier; the previous app can still create a pairing code.
+
 One deployment is one personal device group. No login service, public sharing links, push provider, or paid Zap subscription. Cloudflare usage is billed to your account.
 
 ## Verification
