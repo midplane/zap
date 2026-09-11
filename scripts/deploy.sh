@@ -4,7 +4,7 @@ cd "$(dirname "$0")/../backend"
 npm ci
 npx wrangler whoami
 if ! npx wrangler r2 bucket info zap-content --json > /dev/null; then
-  npx wrangler r2 bucket create zap-content
+  npx wrangler r2 bucket create zap-content --update-config=false
 fi
 npx wrangler deploy
 zap_setup_token=$(openssl rand -hex 32)
