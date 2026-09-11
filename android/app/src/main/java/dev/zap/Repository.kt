@@ -134,7 +134,7 @@ class Repository(private val context: Context) {
             val pairing = JSONObject(String(java.util.Base64.getUrlDecoder().decode(code.substringAfter('#'))))
             val url = pairing.getString("url").trimEnd('/')
             require(Uri.parse(url).scheme == "https") { "Pairing requires an HTTPS server." }
-            val keys = pairing.getJSONObject("keys"), keyId = pairing.getString("keyId"), public = identity.state.getString("public").unb64()
+            val keys = pairing.getJSONObject("keys"); val keyId = pairing.getString("keyId"); val public = identity.state.getString("public").unb64()
             val envelopes = JSONObject()
             keys.keys().forEach { id -> envelopes.put(id, Crypto.wrap(keys.getString(id).unb64(), public, id)) }
             val body = JSONObject().put("token", pairing.getString("token")).put("name", Build.MODEL).put("publicKey", public.b64()).put("keyId", keyId).put("envelope", envelopes.getJSONObject(keyId)).put("historyEnvelopes", envelopes)
@@ -146,7 +146,7 @@ class Repository(private val context: Context) {
     }
     suspend fun removeDevice(deviceId: String) = withContext(Dispatchers.IO) {
         mutex.withLock {
-            val key = Crypto.randomKey(), keyId = UUID.randomUUID().toString(), envelopes = JSONObject()
+            val key = Crypto.randomKey(); val keyId = UUID.randomUUID().toString(); val envelopes = JSONObject()
             for (device in devices.value.filter { it.getString("id") != deviceId }) envelopes.put(device.getString("id"), Crypto.wrap(key, device.getString("publicKey").unb64(), keyId))
             val body = JSONObject().put("removeDevice", deviceId).put("keyId", keyId).put("envelopes", envelopes)
             request("/v1/rotate", "POST", body.toString().toByteArray())
