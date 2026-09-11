@@ -20,7 +20,7 @@ Capture on Mac, share into Android, and find text or images on either device. A 
 
 ## Capabilities and Constraints
 
-Ten days of history by default, configurable from 1 to 365. Text and static images. Local-first operation. Cloudflare deployment by CLI and Android pairing by QR. History-first sync never overwrites the clipboard on arrival. No custom handling of sensitive clipboard content. No pins, OCR, accounts, public links, analytics, backward compatibility, or Raycast migration.
+Ten days of history by default, configurable from 1 to 365. Text and static images. Local-first operation. Cloudflare deployment by CLI and Android pairing by QR. History-first sync never overwrites the clipboard on arrival. No custom handling of sensitive clipboard content. No pins, OCR, accounts, public links, or analytics. Apps and backend ship together.
 
 ## Product Principles
 

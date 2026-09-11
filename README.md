@@ -2,6 +2,8 @@
 
 Private clipboard history for Mac and Android. Native apps, ten days of history by default, and end-to-end encrypted sync through your own Cloudflare account.
 
+Currently intended for personal testing. Read the [production readiness review](docs/production-readiness.md) before distributing or relying on it for important history.
+
 ## Daily use
 
 On Mac, copy text or an image as usual. Open Zap with **⌥Space (Option+Space)**, search, and press **Enter** to paste. Arrows select; Space previews when search is empty; ⌘C copies. Use the menu-bar icon for settings and startup options. Direct paste needs macOS Accessibility permission.
@@ -13,6 +15,8 @@ Both apps work locally without a server. Android refreshes when opened; backgrou
 ## Build
 
 Requirements: Node 22+, a working Swift 5.9+ macOS SDK (full Xcode recommended), JDK 17, and Android SDK 35. No accounts or API keys are baked into the apps.
+
+Both apps use the identifier `dev.midplane.zap`. Android's Kotlin package matches it; the Mac keeps its local database under `~/Library/Application Support/dev.midplane.zap` and its keys in Keychain.
 
 ```sh
 ./scripts/build-mac.sh
@@ -68,7 +72,7 @@ The backend integration test runs a local Cloudflare runtime and covers pairing,
 - `backend`: TypeScript Worker, one SQLite Durable Object, R2 ciphertext.
 - `protocol`: the current wire contract and shared crypto vector.
 
-All content is AES-256-GCM encrypted before upload. P-256 ECDH envelopes deliver keys to paired devices. Cloudflare can see device names, identifiers, timestamps, sizes, and ciphertext, but not clipboard content. Search runs locally. Plaintext image files exist temporarily in Android's private cache when you explicitly copy or share an image.
+All content is AES-256-GCM encrypted before upload. P-256 ECDH envelopes deliver keys to paired devices. The server stores device names, identifiers, timestamps, sizes, and ciphertext. Clients currently trust the server's device roster during key rotation; protection against a malicious server substituting device keys is not implemented. Search runs locally. Plaintext image files exist temporarily in Android's private cache when you explicitly copy or share an image.
 
 Device removal revokes access and rotates encryption for future captures. It cannot erase content already downloaded to another device. An existing device can enroll a replacement; losing every paired device means starting with a fresh deployment/history. Do not delete encryption keys while keeping a local database you want to read.
 

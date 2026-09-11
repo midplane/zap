@@ -1,37 +1,34 @@
-# Incremental verification
+# Verification
 
-## Backend
+Last updated 11 September 2026. The current identifiers are `dev.midplane.zap` on both platforms.
 
-- Passed TypeScript check.
-- Passed local Cloudflare integration: setup authorization, one-use pairing, idempotent blob upload, cross-device retrieval, unchanged cursor, delete/retry rejection, expiry on retention change, credential revocation, and old-key rejection.
+## Checks run
 
-## Android
+| Component | Evidence |
+| --- | --- |
+| Backend | TypeScript check and local Cloudflare integration tests pass with the updated toolchain. Tests cover setup authorization, one-use pairing, upload retries/concurrency, retrieval, cursors, deletion, expiry, revocation, and malformed/oversized requests. |
+| Deployment | Wrangler dry-run bundles successfully with one Durable Object and the intended R2 binding. This review did not deploy backend changes. |
+| Mac | The documented build script compiles with Swift 6.1.2/macOS 15.5 SDK, targets macOS 14, and produces an arm64 app that passes signature verification. Shared crypto vectors and tamper rejection pass. Option+Space opens and closes history. |
+| Android | Debug assembly, JVM crypto checks, and lint pass. The renamed app installs alongside the earlier development app on the connected Pixel 10 Pro. Its new identity also passed pairing and a synthetic text upload against the local backend on the emulator. |
+| Native UI | Mac history and compact pairing sheet, Android empty/populated history and settings, launcher artwork, and light/dark appearance were inspected. Android larger text was checked on the emulator. |
 
-- Passed debug APK build, Android lint (zero errors), and JVM shared crypto vector/key-wrapping/tamper check. Remaining lint warnings concern dependency updates, the annotation processor, and deliberate synchronous preference writes from IO work.
-- Passed emulator text and PNG share ingestion and persistence after force-stop/relaunch.
-- Passed real-client pairing with Mac against local Cloudflare runtime; Android decrypted Mac text and PNG captures, then uploaded its local history.
-- Passed fresh Android-to-Mac live arrival and Android deletion propagating to Mac.
-- Passed bounded phone visual review in normal light mode and dark mode at 1.3× font scale; no emulator crashes were reported.
+## Earlier integration coverage
 
-## Mac
+Actual native clients passed text and PNG capture/share, encrypted pairing and sync in both directions against a loopback Cloudflare runtime, and Android deletion propagating to Mac. Mac Enter-to-paste succeeded in a disposable TextEdit document. Android history survived force-stop/relaunch. The test clients were disconnected and synthetic history removed after those integration checks.
 
-- Passed `./scripts/build-mac.sh` using the active Swift 6.1.2 compiler and macOS 15.5 SDK, targeting macOS 14. The optimized arm64 app passed signature verification.
-- Passed Swift shared crypto vector/key-wrapping/tamper check.
-- Passed text and PNG clipboard capture, shortcut opening, search, and Enter-to-paste into a disposable TextEdit document.
-- Rebuilt and restarted with Option+C as the default shortcut; verified it opens and closes the history panel.
-- Passed native setup against local Cloudflare runtime, encrypted upload, and invitation creation.
-- This machine's Command Line Tools have mismatched PackageDescription symbols and duplicate SwiftBridging module definitions. Both Mac scripts now compile directly without SwiftPM and automatically apply a project-local overlay when duplicate module maps match apart from line comments. No system files have been changed, and no prebuilt binary or manual SDK override is required.
-- Passed bounded native Mac light/dark finish review after correcting secondary-text and search-prompt contrast; reviewer scored every identified issue resolved.
-- Fixed startup failures found by runtime checks: SQLite WAL result handling and the utility lifecycle. Added the standard Edit menu for field shortcuts.
+The Mac build script now bypasses the broken SwiftPM manifest linker on this machine and detects duplicate SwiftBridging module maps. Its workaround is project-local; no system toolchain files were changed.
 
-## Deployment
+## Repeatable commands
 
-- No external resources have been deployed. A loopback-only Cloudflare runtime and synthetic text/PNG fixtures were used for integration checks.
-- Android release builds continue to require HTTPS; only debug builds allow HTTP on localhost/127.0.0.1.
-- Both test clients were disconnected, synthetic history removed, and the local verification server stopped after testing. Deletions made while disconnected stay local.
+```sh
+(cd backend && npm run check && npm test)
+./scripts/build-mac.sh
+./scripts/check-mac-crypto.sh
+(cd android && ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:lintDebug)
+```
 
-## Remaining limits
+Android lint warnings include available dependency upgrades, the annotation processor, backup configuration, and synchronous preference writes on IO threads. The advisory recheck is pending: internal-registry authentication and automatic approval review prevented completing it. Do not interpret passing builds as a clean dependency audit.
 
-- Physical-phone battery/OEM behavior, Android 10 hardware, Intel Mac builds, launch-at-login behavior, notarization, and a production Cloudflare deployment were not exercised.
-- History loading currently decrypts the retained payloads into memory. Large image-heavy histories have not been load-tested.
-- The finish review covered native history screens, not every settings or permission state. OS screen readers were not separately exercised.
+## Not established
+
+Large-history performance, lost enrollment responses, interrupted share imports, storage corruption recovery, physical-phone battery/OEM behavior, Android 10 hardware, Intel Mac builds, actual login startup, release signing/notarization, OS screen-reader traversal, tablets/foldables, and production failure recovery remain unverified. See [production-readiness.md](production-readiness.md) for prioritized findings.

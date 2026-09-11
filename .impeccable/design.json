@@ -8,7 +8,8 @@
       "sources": [
         "mac/Sources/Zap/Views.swift",
         "mac/Sources/Zap/App.swift",
-        "android/app/src/main/java/dev/zap/MainActivity.kt"
+        "android/app/src/main/java/dev/midplane/zap/MainActivity.kt",
+        "android/app/src/main/java/dev/midplane/zap/Theme.kt"
       ],
       "mac": {
         "units": "pt",
@@ -89,7 +90,8 @@
           "emptyStatePadding": 32,
           "thumbnailSize": 48,
           "listBottomClearance": 100,
-          "systemInsets": "Scaffold padding and preview navigationBarsPadding"
+          "systemInsets": "Scaffold padding and preview navigationBarsPadding",
+          "headerMarkSize": 44
         }
       },
       "interactions": {
@@ -99,7 +101,8 @@
           "Space preview",
           "Return or double-click paste",
           "Copy/Preview/Delete context menu",
-          "Native default and cancel sheet actions"
+          "Native default and cancel sheet actions",
+          "Option+Space opens history; pairing opens a compact sheet"
         ],
         "android": [
           "Tap row to preview",
@@ -107,7 +110,8 @@
           "Preview Copy/Share/Delete",
           "Add from clipboard floating action",
           "Toolbar and system Back",
-          "Snackbar feedback"
+          "Snackbar feedback",
+          "Full-width settings action rows with icons and descriptions"
         ],
         "shared": [
           "All/Text/Images filters",
@@ -117,7 +121,15 @@
           "Native clear-history and disconnect confirmations"
         ]
       },
-      "motion": "Native selection and presentation; respect platform reduced-motion behavior. No custom motion tokens."
+      "motion": "Native selection and presentation; respect platform reduced-motion behavior. No custom motion tokens.",
+      "brand": {
+        "mark": "Two offset paper slips",
+        "ink": "#182C3B",
+        "paper": "#F2F4E9",
+        "lime": "#DFF279",
+        "macSource": "scripts/generate-mac-icon.swift",
+        "androidSource": "android/app/src/main/res/drawable/ic_zap_foreground.xml"
+      }
     }
   },
   "narrative": {
