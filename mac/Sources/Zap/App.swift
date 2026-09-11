@@ -38,7 +38,6 @@ import Carbon
         menuItem.button?.image = NSImage(systemSymbolName: "clipboard", accessibilityDescription: "Zap clipboard history")
         menuItem.button?.target = self; menuItem.button?.action = #selector(toggle)
         menuItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
-        model.dismiss = { [weak self] in self?.window.orderOut(nil) }
         model.paste = { [weak self] in self?.pasteSelection() }
         var event = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
         InstallEventHandler(GetApplicationEventTarget(), { _, _, ref in

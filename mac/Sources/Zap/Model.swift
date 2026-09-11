@@ -31,11 +31,9 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
     private var socket: URLSessionWebSocketTask?
     private var socketLoop: Task<Void, Never>?
     private var changeCount = NSPasteboard.general.changeCount
-    private var lastFingerprint: Data?
     private var syncRequested = false
     private var retryAt = Date.distantPast
     private var retryDelay: TimeInterval = 2
-    var dismiss: (() -> Void)?
     var paste: (() -> Void)?
 
     init() throws {
@@ -75,10 +73,9 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
         } catch { self.error = error.localizedDescription }
     }
     func add(_ payload: Payload) throws {
-        let fingerprint = Data(SHA256.hash(data: Data((payload.text ?? payload.png ?? "").utf8)))
-        guard fingerprint != lastFingerprint else { return }
+        if let previous = clips.first?.payload, previous.kind == payload.kind, previous.text == payload.text, previous.png == payload.png { return }
         let clip = Clip(id: UUID().uuidString, payload: payload, pending: true)
-        try store.save(clip); lastFingerprint = fingerprint; clips.insert(clip, at: 0)
+        try store.save(clip); clips.insert(clip, at: 0)
         Task { await sync() }
     }
     func copy(_ clip: Clip, andPaste: Bool = false) {
@@ -129,9 +126,10 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
     func envelopeJSON(_ envelope: Envelope) throws -> Any { try JSONSerialization.jsonObject(with: JSONEncoder().encode(envelope)) }
     func setup(url: String, token: String) async {
         do {
+            guard !connected else { throw ZapError("Disconnect before connecting to another server.") }
             let endpoint = url.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
             guard let parsed = URL(string: endpoint), parsed.scheme == "https" || (parsed.scheme == "http" && ["localhost", "127.0.0.1"].contains(parsed.host ?? "")) else { throw ZapError("Use an HTTPS server URL.") }
-            let key = identity.keys[identity.keyId]!
+            guard let key = identity.keys[identity.keyId] else { throw ZapError("The encryption key is missing.") }
             let envelope = try VaultCrypto.wrap(key, for: identity.publicKey, keyId: identity.keyId)
             let data = try await request("/v1/bootstrap", method: "POST", body: json(["name": Host.current().localizedName ?? "Mac", "publicKey": identity.publicKey, "keyId": identity.keyId, "envelope": envelopeJSON(envelope)]), credential: token, endpoint: endpoint)
             let auth = try JSONDecoder().decode(Credentials.self, from: data)
@@ -157,6 +155,7 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
     }
     func join(code: String) async {
         do {
+            guard !connected else { throw ZapError("Disconnect before joining another history.") }
             guard code.hasPrefix("zap://pair#") else { throw ZapError("Enter a pairing code from an existing device.") }
             var encoded = String(code.dropFirst(11)).replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
             encoded += String(repeating: "=", count: (4 - encoded.count % 4) % 4)
@@ -169,7 +168,7 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
             var envelopes: [String: Any] = [:]
             for (keyId, key) in keys { envelopes[keyId] = try envelopeJSON(VaultCrypto.wrap(key, for: identity.publicKey, keyId: keyId)) }
             guard let envelope = envelopes[pairing.keyId] else { throw ZapError("Pairing key is missing.") }
-            let auth = try JSONDecoder().decode(Credentials.self, from: await request("/v1/pair", method: "POST", body: json(["token": pairing.token, "name": Host.current().localizedName ?? "Mac", "publicKey": identity.publicKey, "keyId": pairing.keyId, "envelope": envelope, "historyEnvelopes": envelopes]), endpoint: pairing.url))
+            let auth = try JSONDecoder().decode(Credentials.self, from: await request("/v1/pair", method: "POST", body: json(["token": pairing.token, "name": Host.current().localizedName ?? "Mac", "publicKey": identity.publicKey, "keyId": pairing.keyId, "envelope": envelope, "historyEnvelopes": envelopes]), credential: "", endpoint: pairing.url))
             identity.url = pairing.url; identity.token = auth.token; identity.deviceId = auth.deviceId; identity.keyId = pairing.keyId; identity.keys = keys
             try persist(); connected = true; error = nil; retryAt = .distantPast; await sync(); connectSocket()
         } catch { self.error = error.localizedDescription }
@@ -178,7 +177,7 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
         do {
             await sync()
             let result = try await request("/v1/invitations", method: "POST")
-            let token = (try JSONSerialization.jsonObject(with: result) as! [String: String])["token"]!
+            guard let token = (try JSONSerialization.jsonObject(with: result) as? [String: String])?["token"], !token.isEmpty else { throw ZapError("The server returned an invalid pairing invitation.") }
             let code = PairCode(url: identity.url, token: token, keyId: identity.keyId, keys: identity.keys.mapValues { $0.base64EncodedString() })
             pairingCode = "zap://pair#" + (try JSONEncoder().encode(code)).base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
         } catch { self.error = error.localizedDescription }
@@ -211,12 +210,15 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
             }
             for id in try store.deletions() { _ = try await request("/v1/items/\(id)", method: "DELETE"); try store.deleted(id) }
             if UserDefaults.standard.bool(forKey: "daysPending") {
-                _ = try await request("/v1/settings", method: "PUT", body: json(["days": days])); UserDefaults.standard.removeObject(forKey: "daysPending")
+                let requestedDays = days
+                _ = try await request("/v1/settings", method: "PUT", body: json(["days": requestedDays]))
+                if days == requestedDays { UserDefaults.standard.removeObject(forKey: "daysPending") }
             }
             let snapshot = try JSONDecoder().decode(Snapshot.self, from: await request("/v1/sync?cursor=\(cursor)"))
             for entry in snapshot.keys where identity.keys[entry.keyId] == nil { identity.keys[entry.keyId] = try VaultCrypto.unwrap(entry.envelope, privateKey: identity.privateKey, keyId: entry.keyId) }
+            guard let currentKey = identity.keys[snapshot.keyId], currentKey.count == 32, (1...365).contains(snapshot.days) else { throw ZapError("The server returned invalid sync settings.") }
             identity.keyId = snapshot.keyId; try persist(); devices = snapshot.devices
-            days = snapshot.days; UserDefaults.standard.set(days, forKey: "days")
+            if !UserDefaults.standard.bool(forKey: "daysPending") { days = snapshot.days; UserDefaults.standard.set(days, forKey: "days") }
             if let items = snapshot.items {
                 let remoteIDs = Set(items.map(\.id))
                 for clip in clips where !clip.pending && !remoteIDs.contains(clip.id) { try store.remove(clip.id) }
@@ -234,7 +236,7 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
             cursor = snapshot.cursor
             try reload()
             for clip in clips where clip.pending {
-                let encrypted = try VaultCrypto.seal(JSONEncoder().encode(clip.payload), key: identity.keys[identity.keyId]!, aad: clip.id)
+                let encrypted = try VaultCrypto.seal(JSONEncoder().encode(clip.payload), key: currentKey, aad: clip.id)
                 do {
                     _ = try await request("/v1/items/\(clip.id)", method: "PUT", body: encrypted, headers: ["Content-Type": "application/octet-stream", "X-Key-Id": identity.keyId, "X-Created-At": String(clip.payload.createdAt)])
                     try store.sent(clip.id)

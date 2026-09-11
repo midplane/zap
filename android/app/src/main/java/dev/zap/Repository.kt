@@ -55,7 +55,7 @@ class Repository(private val context: Context) {
     val error = MutableStateFlow<String?>(null)
     val devices = MutableStateFlow<List<JSONObject>>(emptyList())
     val connected = MutableStateFlow(identity.connected)
-    init { scope.launch { try { refresh() } catch (e: Exception) { error.value = e.message } } }
+    init { scope.launch { mutex.withLock { try { refresh() } catch (e: Exception) { error.value = e.message } } } }
     private suspend fun save(clip: Clip) {
         val file = File(directory, clip.id)
         val temp = File(directory, "${clip.id}.tmp")
@@ -95,7 +95,6 @@ class Repository(private val context: Context) {
             }
             output.toByteArray()
         } ?: error("Image could not be opened")
-        require(data.size <= 20 * 1024 * 1024) { "Image is too large. Maximum: 20 MiB." }
         val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }; BitmapFactory.decodeByteArray(data, 0, data.size, options)
         require(options.outWidth > 0 && options.outHeight > 0 && options.outWidth.toLong() * options.outHeight <= 40_000_000) { "Use a static image up to 40 megapixels." }
         require(options.outMimeType != "image/gif") { "Animated images are not supported. Share a PNG or JPEG." }
@@ -130,7 +129,8 @@ class Repository(private val context: Context) {
         }; enqueue()
     }
     private fun request(path: String, method: String = "GET", body: ByteArray? = null, headers: Map<String, String> = emptyMap(), url: String = identity.state.getString("url")): ByteArray {
-        val builder = Request.Builder().url(url + path).header("Authorization", "Bearer ${identity.state.getString("token")}")
+        val builder = Request.Builder().url(url + path)
+        if (url == identity.state.getString("url") && identity.connected) builder.header("Authorization", "Bearer ${identity.state.getString("token")}")
         for ((key, value) in headers) builder.header(key, value)
         builder.method(method, if (method in listOf("POST", "PUT")) (body ?: ByteArray(0)).toRequestBody() else body?.toRequestBody())
         http.newCall(builder.build()).execute().use { response ->
@@ -141,6 +141,7 @@ class Repository(private val context: Context) {
     }
     suspend fun pair(code: String) = withContext(Dispatchers.IO) {
         mutex.withLock {
+            require(!identity.connected) { "Disconnect before pairing with another server." }
             require(code.startsWith("zap://pair#")) { "Scan the pairing code shown in Zap on Mac." }
             val pairing = JSONObject(String(java.util.Base64.getUrlDecoder().decode(code.substringAfter('#'))))
             val url = pairing.getString("url").trimEnd('/')
@@ -148,7 +149,11 @@ class Repository(private val context: Context) {
             require(endpoint.scheme == "https" || (BuildConfig.DEBUG && endpoint.scheme == "http" && endpoint.host in listOf("localhost", "127.0.0.1"))) { "Pairing requires an HTTPS server." }
             val keys = pairing.getJSONObject("keys"); val keyId = pairing.getString("keyId"); val public = identity.state.getString("public").unb64()
             val envelopes = JSONObject()
-            keys.keys().forEach { id -> envelopes.put(id, Crypto.wrap(keys.getString(id).unb64(), public, id)) }
+            keys.keys().forEach { id ->
+                val key = keys.getString(id).unb64()
+                require(key.size == 32) { "Invalid pairing key" }
+                envelopes.put(id, Crypto.wrap(key, public, id))
+            }
             val body = JSONObject().put("token", pairing.getString("token")).put("name", Build.MODEL).put("publicKey", public.b64()).put("keyId", keyId).put("envelope", envelopes.getJSONObject(keyId)).put("historyEnvelopes", envelopes)
             val result = JSONObject(String(request("/v1/pair", "POST", body.toString().toByteArray(), url = url)))
             identity.state.put("url", url).put("token", result.getString("token")).put("deviceId", result.getString("deviceId")).put("keyId", keyId).put("keys", keys)
@@ -221,7 +226,8 @@ class Repository(private val context: Context) {
                     catch (e: ApiException) { if (e.status == 410) removeLocal(clip.id) else throw e }
                 }
                 refresh(); status.value = "Up to date"; error.value = null; true
-            } catch (e: Exception) { status.value = "Offline · will retry"; error.value = e.message ?: "Could not sync"; false }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { status.value = "Offline · will retry"; error.value = e.message ?: "Could not sync"; false }
         }
     }
     fun foreground(value: Boolean) {

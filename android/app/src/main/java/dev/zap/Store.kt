@@ -12,7 +12,6 @@ interface ClipDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun save(clip: StoredClip)
     @Query("UPDATE clips SET pending=0 WHERE id=:id") suspend fun sent(id: String)
     @Query("DELETE FROM clips WHERE id=:id") suspend fun remove(id: String)
-    @Query("DELETE FROM clips WHERE createdAt<=:cutoff") suspend fun expire(cutoff: Long)
     @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun queue(deletion: Deletion)
     @Query("SELECT id FROM deletions") suspend fun deletions(): List<String>
     @Query("DELETE FROM deletions WHERE id=:id") suspend fun deleted(id: String)

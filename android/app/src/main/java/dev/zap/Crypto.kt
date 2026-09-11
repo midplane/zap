@@ -27,7 +27,6 @@ fun String.unb64(): ByteArray = Base64.getDecoder().decode(this)
 
 object Crypto {
     fun randomKey() = ByteArray(32).also { SecureRandom().nextBytes(it) }
-    fun privateKey(): ByteArray = KeyPairGenerator.getInstance("EC").apply { initialize(ECGenParameterSpec("secp256r1")) }.generateKeyPair().private.encoded
     private fun private(raw: ByteArray) = KeyFactory.getInstance("EC").generatePrivate(PKCS8EncodedKeySpec(raw))
     private fun point(raw: ByteArray): ECPublicKey {
         require(raw.size == 65 && raw[0] == 4.toByte()) { "Invalid device public key" }
