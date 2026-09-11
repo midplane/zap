@@ -13,6 +13,8 @@ test("vault pairing, retries, deletion, expiry, and revocation", async () => {
     const registration = { name: "Mac", keyId, publicKey: "A".repeat(88), envelope };
     const call = (path: string, method = "GET", token = "", body?: unknown, headers = {}) => mf.dispatchFetch("https://zap.test" + path, { method, headers: { Authorization: `Bearer ${token}`, ...headers }, body: body === undefined ? undefined : body instanceof Uint8Array ? body : JSON.stringify(body) });
     assert.equal((await call("/v1/sync")).status, 401);
+    for (const body of [null, [], "invalid"]) assert.equal((await call("/v1/bootstrap", "POST", "test-setup", body)).status, 400);
+    assert.equal((await call("/v1/pair", "POST", "", { token: "x".repeat(64_001) })).status, 413);
     const boot = await call("/v1/bootstrap", "POST", "test-setup", registration);
     assert.equal(boot.status, 200);
     const mac = await boot.json() as any;
@@ -42,5 +44,14 @@ test("vault pairing, retries, deletion, expiry, and revocation", async () => {
     assert.equal((await call("/v1/rotate", "POST", mac.token, { removeDevice: phone.deviceId, keyId: nextKey, envelopes: { [mac.deviceId]: envelope } })).status, 200);
     assert.equal((await call("/v1/sync", "GET", phone.token)).status, 401);
     assert.equal((await call(`/v1/items/${crypto.randomUUID()}`, "PUT", mac.token, blob, headers)).status, 409);
+    const raceID = crypto.randomUUID();
+    const candidates = [new Uint8Array(64).fill(1), new Uint8Array(128).fill(2)];
+    const uploads = await Promise.all(candidates.map(body => call(`/v1/items/${raceID}`, "PUT", mac.token, body, { ...headers, "X-Key-Id": nextKey, "Content-Length": String(body.length) })));
+    assert.ok(uploads.some(response => response.status === 200));
+    assert.ok(uploads.every(response => [200, 409].includes(response.status)));
+    const downloaded = new Uint8Array(await (await call(`/v1/items/${raceID}`, "GET", mac.token)).arrayBuffer());
+    const racedState = await (await call("/v1/sync", "GET", mac.token)).json() as any;
+    assert.equal(racedState.items.find((item: any) => item.id === raceID).size, downloaded.length);
+    assert.deepEqual(downloaded, candidates.find(body => body.length === downloaded.length));
   } finally { await mf.dispose(); }
 });

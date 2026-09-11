@@ -5,10 +5,30 @@ type Row = Record<string, SqlStorageValue>;
 const json = (body: unknown, status = 200) => Response.json(body, { status });
 class HTTPError extends Error { constructor(message: string, readonly status: number) { super(message); } }
 function fail(message: string, status = 400): never { throw new HTTPError(message, status); }
+async function readBody(request: Request, limit: number): Promise<Uint8Array> {
+  const reader = request.body?.getReader();
+  if (!reader) return new Uint8Array();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > limit) { await reader.cancel(); fail("Request too large.", 413); }
+      chunks.push(value);
+    }
+  } finally { reader.releaseLock(); }
+  const result = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.byteLength; }
+  return result;
+}
 export default { fetch(request: Request, env: Env) { return env.VAULT.get(env.VAULT.idFromName("personal")).fetch(request); } };
 
 export class Vault extends DurableObject<Env> {
   private sql: SqlStorage;
+  private uploads = new Set<string>();
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env); this.sql = ctx.storage.sql;
     this.sql.exec(`
@@ -50,7 +70,9 @@ export class Vault extends DurableObject<Env> {
     const url = new URL(request.url), path = url.pathname, method = request.method;
     if (path === "/health") return json({ service: "zap" });
     const body = async (): Promise<Record<string, any>> => {
-      const text = await request.text(); if (text.length > 64_000) fail("Request too large.", 413); return JSON.parse(text);
+      const value = JSON.parse(new TextDecoder().decode(await readBody(request, 64_000)));
+      if (!value || typeof value !== "object" || Array.isArray(value)) fail("Expected a JSON object.");
+      return value;
     };
     if (path === "/v1/bootstrap" && method === "POST") {
       const provided = request.headers.get("Authorization")?.replace(/^Bearer /, "") || "";
@@ -129,20 +151,24 @@ export class Vault extends DurableObject<Env> {
       }
       if (method === "DELETE") { this.remove(id); this.changed(); await this.schedule(); return json({ ok: true }); }
       if (method === "PUT") {
-        const createdAt = Number(request.headers.get("X-Created-At")), keyId = request.headers.get("X-Key-Id") || "";
-        if (!active(createdAt, Number(settings.days))) fail("Item has expired.", 410);
-        if (keyId !== settings.keyId) fail("Refresh encryption keys and retry.", 409);
         if (this.rows("SELECT id FROM deleted WHERE id=?", id)[0]) fail("Item was deleted.", 410);
-        if (this.rows("SELECT id FROM items WHERE id=?", id)[0]) return json({ ok: true });
-        const length = Number(request.headers.get("Content-Length"));
-        if (!length || length > MAX_BLOB || length < 28) fail("Content is too large or empty.", 413);
-        const data = await request.arrayBuffer(); if (data.byteLength !== length || data.byteLength > MAX_BLOB) fail("Invalid content size.", 413);
-        await this.env.BLOBS.put(id, data);
-        if (this.rows("SELECT id FROM deleted WHERE id=?", id)[0] || this.settings().keyId !== keyId || !this.rows("SELECT id FROM devices WHERE id=?", device.id)[0] || !active(createdAt, Number(this.settings().days))) {
-          this.sql.exec("INSERT OR IGNORE INTO garbage VALUES(?)", id); await this.schedule(); fail("State changed. Refresh and retry.", 409);
-        }
-        this.sql.exec("INSERT OR IGNORE INTO items VALUES(?,?,?,?,?)", id, device.id, keyId, createdAt, length);
-        this.changed(); return json({ ok: true });
+        if (this.uploads.has(id) || this.rows("SELECT id FROM garbage WHERE id=?", id).length) fail("Item is busy. Retry shortly.", 409);
+        this.uploads.add(id);
+        try {
+          const createdAt = Number(request.headers.get("X-Created-At")), keyId = request.headers.get("X-Key-Id") || "";
+          if (!active(createdAt, Number(settings.days))) fail("Item has expired.", 410);
+          if (keyId !== settings.keyId) fail("Refresh encryption keys and retry.", 409);
+          if (this.rows("SELECT id FROM items WHERE id=?", id)[0]) return json({ ok: true });
+          const length = Number(request.headers.get("Content-Length"));
+          if (!length || length > MAX_BLOB || length < 28) fail("Content is too large or empty.", 413);
+          const data = await readBody(request, length); if (data.byteLength !== length) fail("Invalid content size.", 413);
+          await this.env.BLOBS.put(id, data);
+          if (this.rows("SELECT id FROM deleted WHERE id=?", id)[0] || this.settings().keyId !== keyId || !this.rows("SELECT id FROM devices WHERE id=?", device.id)[0] || !active(createdAt, Number(this.settings().days))) {
+            this.sql.exec("INSERT OR IGNORE INTO garbage VALUES(?)", id); await this.schedule(); fail("State changed. Refresh and retry.", 409);
+          }
+          this.sql.exec("INSERT OR IGNORE INTO items VALUES(?,?,?,?,?)", id, device.id, keyId, createdAt, length);
+          this.changed(); return json({ ok: true });
+        } finally { this.uploads.delete(id); }
       }
     }
     return json({ error: "Not found." }, 404);
@@ -157,11 +183,18 @@ export class Vault extends DurableObject<Env> {
     for (const item of expired) this.remove(String(item.id));
     if (expired.length) this.changed();
     this.sql.exec("DELETE FROM invitations WHERE expires<?", Date.now()); this.sql.exec("DELETE FROM deleted WHERE expires<?", Date.now());
-    for (const row of this.rows("SELECT id FROM garbage LIMIT 100")) { await this.env.BLOBS.delete(String(row.id)); this.sql.exec("DELETE FROM garbage WHERE id=?", row.id); }
+    for (const row of this.rows("SELECT id FROM garbage LIMIT 100")) {
+      if (this.uploads.has(String(row.id))) continue;
+      await this.env.BLOBS.delete(String(row.id)); this.sql.exec("DELETE FROM garbage WHERE id=?", row.id);
+    }
     const cursor = await this.ctx.storage.get<string>("blobScanCursor");
     const page = await this.env.BLOBS.list({ limit: 1000, cursor });
     for (const blob of page.objects) {
-      if (blob.uploaded.getTime() < Date.now() - 3_600_000 && !this.rows("SELECT id FROM items WHERE id=?", blob.key)[0]) await this.env.BLOBS.delete(blob.key);
+      if (blob.uploaded.getTime() < Date.now() - 3_600_000 && !this.uploads.has(blob.key) && !this.rows("SELECT id FROM items WHERE id=?", blob.key)[0]) {
+        this.sql.exec("INSERT OR IGNORE INTO garbage VALUES(?)", blob.key);
+        await this.env.BLOBS.delete(blob.key);
+        this.sql.exec("DELETE FROM garbage WHERE id=?", blob.key);
+      }
     }
     if (page.truncated) await this.ctx.storage.put("blobScanCursor", page.cursor);
     else await this.ctx.storage.delete("blobScanCursor");
