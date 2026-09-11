@@ -16,6 +16,7 @@ colors:
   android-surface-dark: "#121419"
 rounded:
   mac-thumbnail: "8pt"
+  mac-window: "12pt"
   android-search: "16dp"
 ---
 
@@ -43,7 +44,7 @@ Android keeps the Material 3 system type scale and font scaling: `headlineSmall`
 
 ## Layout
 
-Mac starts at 680 × 580 pt and supports a 580 × 420 pt minimum. Search and footer align to 20 pt horizontal insets. Rows use 12 pt between thumbnail and text, 8 pt vertical padding, 5 pt between excerpt and metadata, and 6 pt between metadata elements. Thumbnails occupy 44 × 44 pt. The filter control is 220 pt wide. Preview sheets are 540 × 420 pt with 24 pt padding and 16 pt spacing; Settings uses the same padding.
+The Mac panel is borderless: no title bar and no window buttons, so content begins at the top edge. It is dismissed with Escape, the shortcut, or the menu bar item, and hides when Zap deactivates. It starts at 680 × 580 pt and supports a 580 × 420 pt minimum. Search and footer align to 20 pt horizontal insets. Rows use 12 pt between thumbnail and text, 8 pt vertical padding, 5 pt between excerpt and metadata, and 6 pt between metadata elements. Thumbnails occupy 44 × 44 pt. The filter control is 220 pt wide. Preview sheets are 540 × 420 pt with 24 pt padding and 16 pt spacing; Settings uses the same padding.
 
 Android centers history within 760 dp and settings within 680 dp. Search and filters use 20 dp horizontal insets; filters have 8 dp gaps. Settings and preview use 24 dp padding, with 20 dp settings section gaps and 16 dp preview gaps. Other recurring gaps are 4, 8, and 12 dp; empty states use 32 dp outer padding. Thumbnails occupy 48 dp. Lists reserve 100 dp bottom space for the clipboard action. Scaffold and preview respect system bar insets.
 
@@ -53,7 +54,7 @@ Lists remain flat, with native selection, subtle thumbnail backing on Mac, and i
 
 ## Shapes
 
-Only Mac thumbnails and Android search have custom corner radii, recorded above. List selection, filters, buttons, fields, sheets, and dialogs retain their platform shapes. Images fit their bounds while preserving aspect ratio; previews remain scrollable.
+Only the Mac panel, Mac thumbnails, and Android search have custom corner radii, recorded above. List selection, filters, buttons, fields, sheets, and dialogs retain their platform shapes. Images fit their bounds while preserving aspect ratio; previews remain scrollable.
 
 ## Components
 

@@ -10,9 +10,13 @@ import Carbon
         withExtendedLifetime(delegate) { application.run() }
     }
 }
+/// Borderless windows refuse key status unless they say otherwise, and the panel is keyboard-first.
+final class HistoryPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+}
 @MainActor final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var model: Model!
-    private var window: NSPanel!
+    private var window: HistoryPanel!
     private var menuItem: NSStatusItem!
     private var hotkey: EventHotKeyRef?
     private var previousApp: NSRunningApplication?
@@ -30,10 +34,14 @@ import Carbon
         do { model = try Model() } catch {
             let alert = NSAlert(); alert.messageText = "Zap couldn’t open"; alert.informativeText = error.localizedDescription; alert.runModal(); NSApp.terminate(nil); return
         }
-        window = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 680, height: 580), styleMask: [.titled, .closable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
-        window.title = "Zap"; window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true
+        window = HistoryPanel(contentRect: NSRect(x: 0, y: 0, width: 680, height: 580), styleMask: [.borderless, .resizable], backing: .buffered, defer: false)
+        window.title = "Zap"
         window.isReleasedWhenClosed = false; window.level = .floating; window.delegate = self
-        window.contentView = NSHostingView(rootView: HistoryView(model: model)); window.center()
+        window.isMovableByWindowBackground = true
+        window.backgroundColor = .clear; window.isOpaque = false; window.hasShadow = true
+        let content = NSHostingView(rootView: HistoryView(model: model))
+        content.wantsLayer = true; content.layer?.cornerRadius = 12; content.layer?.masksToBounds = true
+        window.contentView = content; window.center()
         menuItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         menuItem.button?.image = NSImage(systemSymbolName: "clipboard", accessibilityDescription: "Zap clipboard history")
         menuItem.button?.target = self; menuItem.button?.action = #selector(toggle)
