@@ -23,6 +23,7 @@ struct Identity: Codable {
     var url: String = ""
     var token: String = ""
     var deviceId: String = ""
+    var enrollment: PendingEnrollment?
     static func make() -> Identity {
         let id = UUID().uuidString
         return Identity(privateKey: P256.KeyAgreement.PrivateKey().rawRepresentation, localKey: VaultCrypto.randomKey(), keys: [id: VaultCrypto.randomKey()], keyId: id)

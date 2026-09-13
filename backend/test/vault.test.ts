@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { build } from "esbuild";
 import { Miniflare } from "miniflare";
-import { DAY } from "../src/rules";
+import { DAY, secret } from "../src/rules";
 
 test("vault pairing, retries, deletion, expiry, and revocation", async () => {
   const bundle = await build({ entryPoints: ["src/index.ts"], bundle: true, write: false, format: "esm", platform: "neutral", external: ["cloudflare:workers"] });
@@ -10,20 +10,30 @@ test("vault pairing, retries, deletion, expiry, and revocation", async () => {
   try {
     const envelope = { ephemeralPublicKey: "A".repeat(88), nonce: "A".repeat(16), ciphertext: "A".repeat(64) };
     const keyId = crypto.randomUUID();
-    const registration = { name: "Mac", keyId, publicKey: "A".repeat(88), envelope };
+    const identity = () => ({ enrollmentId: crypto.randomUUID(), deviceToken: secret() });
+    const registration = { name: "Mac", keyId, publicKey: "A".repeat(88), envelope, ...identity() };
     const call = (path: string, method = "GET", token = "", body?: unknown, headers = {}) => mf.dispatchFetch("https://zap.test" + path, { method, headers: { Authorization: `Bearer ${token}`, ...headers }, body: body === undefined ? undefined : body instanceof Uint8Array ? body : JSON.stringify(body) });
     assert.equal((await call("/v1/sync")).status, 401);
     for (const body of [null, [], "invalid"]) assert.equal((await call("/v1/bootstrap", "POST", "test-setup", body)).status, 400);
     assert.equal((await call("/v1/pair", "POST", "", { token: "x".repeat(64_001) })).status, 413);
+    assert.equal((await call("/v1/bootstrap", "POST", "wrong", registration)).status, 401);
     const boot = await call("/v1/bootstrap", "POST", "test-setup", registration);
     assert.equal(boot.status, 200);
     const mac = await boot.json() as any;
-    assert.equal((await call("/v1/bootstrap", "POST", "test-setup", registration)).status, 409);
+    assert.deepEqual(await (await call("/v1/bootstrap", "POST", "", registration)).json(), mac);
+    assert.equal((await call("/v1/bootstrap", "POST", "test-setup", { ...registration, ...identity() })).status, 409);
+    assert.equal((await call("/v1/bootstrap", "POST", "", { ...registration, deviceToken: secret() })).status, 409);
     const invitation = await (await call("/v1/invitations", "POST", mac.token)).json() as any;
-    const pairBody = { ...registration, name: "Android", token: invitation.token };
-    const phone = await (await call("/v1/pair", "POST", "", pairBody)).json() as any;
+    const pairBody = { ...registration, ...identity(), name: "Android", token: invitation.token };
+    const pairReplies = await Promise.all([call("/v1/pair", "POST", "", pairBody), call("/v1/pair", "POST", "", pairBody)]);
+    assert.ok(pairReplies.every(response => response.status === 200));
+    const phone = await pairReplies[0].json() as any;
+    assert.deepEqual(await pairReplies[1].json(), phone);
     assert.ok(phone.token);
-    assert.equal((await call("/v1/pair", "POST", "", pairBody)).status, 401);
+    assert.deepEqual(await (await call("/v1/pair", "POST", "", Object.fromEntries(Object.entries(pairBody).reverse()))).json(), phone);
+    assert.deepEqual(await (await call("/v1/pair", "POST", "", pairBody)).json(), phone);
+    assert.equal((await call("/v1/pair", "POST", "", { ...pairBody, ...identity() })).status, 401);
+    assert.equal((await call("/v1/pair", "POST", "", { ...pairBody, publicKey: "B".repeat(88) })).status, 409);
     const id = crypto.randomUUID(), blob = crypto.getRandomValues(new Uint8Array(64));
     const headers = { "X-Key-Id": keyId, "X-Created-At": String(Date.now()), "Content-Length": "64" };
     assert.equal((await call(`/v1/items/${id}`, "PUT", mac.token, blob, headers)).status, 200);
@@ -43,6 +53,7 @@ test("vault pairing, retries, deletion, expiry, and revocation", async () => {
     const nextKey = crypto.randomUUID();
     assert.equal((await call("/v1/rotate", "POST", mac.token, { removeDevice: phone.deviceId, keyId: nextKey, envelopes: { [mac.deviceId]: envelope } })).status, 200);
     assert.equal((await call("/v1/sync", "GET", phone.token)).status, 401);
+    assert.equal((await call("/v1/pair", "POST", "", pairBody)).status, 401);
     assert.equal((await call(`/v1/items/${crypto.randomUUID()}`, "PUT", mac.token, blob, headers)).status, 409);
     const raceID = crypto.randomUUID();
     const candidates = [new Uint8Array(64).fill(1), new Uint8Array(128).fill(2)];
@@ -54,13 +65,14 @@ test("vault pairing, retries, deletion, expiry, and revocation", async () => {
     assert.equal(racedState.items.find((item: any) => item.id === raceID).size, downloaded.length);
     assert.deepEqual(downloaded, candidates.find(body => body.length === downloaded.length));
     const rejoin = await (await call("/v1/invitations", "POST", mac.token)).json() as any;
-    const second = await (await call("/v1/pair", "POST", "", { ...registration, name: "Android 2", keyId: nextKey, token: rejoin.token })).json() as any;
+    const second = await (await call("/v1/pair", "POST", "", { ...registration, ...identity(), name: "Android 2", keyId: nextKey, token: rejoin.token })).json() as any;
     assert.equal((await call("/v1/sync", "GET", second.token)).status, 200);
     assert.equal((await call("/v1/devices/me", "DELETE", second.token)).status, 200);
     assert.equal((await call("/v1/sync", "GET", second.token)).status, 401);
     assert.equal(((await (await call("/v1/sync", "GET", mac.token)).json() as any).devices).length, 1);
     assert.equal((await call("/v1/devices/me", "DELETE", mac.token)).status, 200);
     assert.equal((await call("/v1/sync", "GET", mac.token)).status, 401);
-    assert.equal((await call("/v1/bootstrap", "POST", "test-setup", registration)).status, 200);
+    assert.equal((await call("/v1/bootstrap", "POST", "test-setup", registration)).status, 401);
+    assert.equal((await call("/v1/bootstrap", "POST", "test-setup", { ...registration, ...identity() })).status, 200);
   } finally { await mf.dispose(); }
 });

@@ -63,6 +63,8 @@ The script provisions `zap-content` in R2, deploys the Worker/Durable Object, an
 
 Any connected device can create a code with **Pair another device**. To add a second or replacement Mac, copy the code from the pairing sheet, then paste it into **Join existing history** in Settings on the new Mac — the same code works for a Mac or a phone. **Disconnect** forgets the server connection while retaining local history; that history uploads when you connect to another server.
 
+Both apps securely save enrollment before contacting the server and resume it after a restart or lost response. Retry connecting to finish a pending attempt.
+
 The setup token initializes a server once. If you see “This deployment is already initialized,” join using a pairing code from a connected device. This also applies after changing the app identifier; the previous app can still create a pairing code.
 
 One deployment is one personal device group. No login service, public sharing links, push provider, or paid Zap subscription. Cloudflare usage is billed to your account.

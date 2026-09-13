@@ -39,6 +39,7 @@ export class Vault extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS items (id TEXT PRIMARY KEY, deviceId TEXT NOT NULL, keyId TEXT NOT NULL, createdAt INTEGER NOT NULL, size INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS deleted (id TEXT PRIMARY KEY, expires INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS garbage (id TEXT PRIMARY KEY);
+      CREATE TABLE IF NOT EXISTS enrollments (id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL);
     `);
   }
   private rows(query: string, ...args: SqlStorageValue[]): Row[] { return this.sql.exec(query, ...args).toArray(); }
@@ -56,6 +57,18 @@ export class Vault extends DurableObject<Env> {
     if (typeof b.name !== "string" || !b.name.trim() || b.name.length > 80) fail("Give the device a name.");
     if (typeof b.publicKey !== "string" || b.publicKey.length !== 88 || !validID(b.keyId)) fail("Invalid device key.");
     return this.envelope(b.envelope);
+  }
+  private async enrollment(b: Record<string, any>, path: string) {
+    if (!validID(b.enrollmentId) || typeof b.deviceToken !== "string" || !/^[a-f0-9]{64}$/.test(b.deviceToken)) fail("Update Zap to enroll this device.");
+    const canonical = (value: any): any => Array.isArray(value) ? value.map(canonical) : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
+    return { id: b.enrollmentId as string, token: b.deviceToken as string, hash: await digest(b.deviceToken), fingerprint: await digest(JSON.stringify([path, canonical(b)])) };
+  }
+  private replay(enrollment: { id: string; fingerprint: string }): boolean {
+    const previous = this.rows("SELECT fingerprint FROM enrollments WHERE id=?", enrollment.id)[0];
+    if (!previous) return false;
+    if (previous.fingerprint !== enrollment.fingerprint) fail("Enrollment changed. Use the original request.", 409);
+    if (!this.rows("SELECT id FROM devices WHERE id=?", enrollment.id)[0]) fail("This enrollment was revoked. Create a new pairing code.", 401);
+    return true;
   }
   async fetch(request: Request): Promise<Response> {
     try { return await this.route(request); }
@@ -75,20 +88,27 @@ export class Vault extends DurableObject<Env> {
       return value;
     };
     if (path === "/v1/bootstrap" && method === "POST") {
+      const b = await body(), envelope = this.registration(b), enrollment = await this.enrollment(b, path);
+      const { id, token, hash, fingerprint } = enrollment;
+      if (this.replay(enrollment)) return json({ deviceId: id, token, keyId: b.keyId });
       const provided = request.headers.get("Authorization")?.replace(/^Bearer /, "") || "";
       if (!this.env.BOOTSTRAP_TOKEN || await digest(provided) !== await digest(this.env.BOOTSTRAP_TOKEN)) fail("Invalid setup token.", 401);
-      const b = await body(), envelope = this.registration(b), id = crypto.randomUUID(), token = secret(), hash = await digest(token);
       this.ctx.storage.transactionSync(() => {
+        if (this.replay(enrollment)) return;
         if (this.settings()) fail("This deployment is already initialized.", 409);
         this.sql.exec("INSERT INTO settings VALUES(1,10,1,?)", b.keyId);
         this.sql.exec("INSERT INTO devices VALUES(?,?,?,?)", id, b.name, hash, b.publicKey);
         this.sql.exec("INSERT INTO keys VALUES(?,?,?)", id, b.keyId, envelope);
+        this.sql.exec("INSERT INTO enrollments VALUES(?,?)", id, fingerprint);
       });
       await this.schedule(); return json({ deviceId: id, token, keyId: b.keyId });
     }
     if (path === "/v1/pair" && method === "POST") {
-      const b = await body(), envelope = this.registration(b), invitationHash = await digest(String(b.token)), id = crypto.randomUUID(), token = secret(), hash = await digest(token);
+      const b = await body(), envelope = this.registration(b), invitationHash = await digest(String(b.token)), enrollment = await this.enrollment(b, path);
+      const { id, token, hash, fingerprint } = enrollment;
+      if (this.replay(enrollment)) return json({ deviceId: id, token, keyId: b.keyId });
       this.ctx.storage.transactionSync(() => {
+        if (this.replay(enrollment)) return;
         const invite = this.rows("SELECT * FROM invitations WHERE token=?", invitationHash)[0];
         if (!invite || Number(invite.expires) < Date.now() || invite.keyId !== b.keyId || this.settings().keyId !== b.keyId) fail("Pairing code expired. Create a new one on Mac.", 401);
         this.sql.exec("DELETE FROM invitations WHERE token=?", invitationHash);
@@ -98,6 +118,7 @@ export class Vault extends DurableObject<Env> {
           if (!validID(keyId)) fail("Invalid history key.");
           this.sql.exec("INSERT OR IGNORE INTO keys VALUES(?,?,?)", id, keyId, this.envelope(wrapped));
         }
+        this.sql.exec("INSERT INTO enrollments VALUES(?,?)", id, fingerprint);
       });
       this.changed(); return json({ deviceId: id, token, keyId: b.keyId });
     }

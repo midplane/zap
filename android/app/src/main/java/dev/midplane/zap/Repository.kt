@@ -88,7 +88,7 @@ class Repository(private val context: Context) {
     }
     fun updateBackgroundSync() {
         val manager = WorkManager.getInstance(context)
-        if (identity.connected) {
+        if (identity.connected || identity.enrollment() != null) {
             val constraints = Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).setRequiresBatteryNotLow(true).build()
             val work = PeriodicWorkRequestBuilder<SyncWorker>(15, TimeUnit.MINUTES).setConstraints(constraints).build()
             manager.enqueueUniquePeriodicWork("zap-refresh", ExistingPeriodicWorkPolicy.UPDATE, work)
@@ -167,6 +167,7 @@ class Repository(private val context: Context) {
     suspend fun pair(code: String) = withContext(Dispatchers.IO) {
         mutex.withLock {
             require(!identity.connected) { "Disconnect before pairing with another server." }
+            if (identity.enrollment() != null) { finishEnrollment(); return@withLock }
             require(code.startsWith("zap://pair#")) { "Scan the pairing code shown in Zap on Mac." }
             val pairing = JSONObject(String(java.util.Base64.getUrlDecoder().decode(code.substringAfter('#'))))
             val url = pairing.getString("url").trimEnd('/')
@@ -180,11 +181,23 @@ class Repository(private val context: Context) {
                 envelopes.put(id, Crypto.wrap(key, public, id))
             }
             val body = JSONObject().put("token", pairing.getString("token")).put("name", Build.MODEL).put("publicKey", public.b64()).put("keyId", keyId).put("envelope", envelopes.getJSONObject(keyId)).put("historyEnvelopes", envelopes)
-            val result = JSONObject(String(request("/v1/pair", "POST", body.toString().toByteArray(), url = url)))
-            identity.update("url" to url, "token" to result.getString("token"), "deviceId" to result.getString("deviceId"), "keyId" to keyId, "keys" to keys)
-            connected.value = true; server.value = url; deviceId.value = result.getString("deviceId"); cursor = -1; error.value = null
+            identity.update("enrollment" to PendingEnrollment.create(url, body, keys).record.toString())
+            updateBackgroundSync()
+            finishEnrollment()
         }
         updateBackgroundSync(); sync(); if (active) connectSocket()
+    }
+    private fun finishEnrollment() {
+        val pending = identity.enrollment() ?: return
+        try {
+            val result = JSONObject(String(request("/v1/pair", "POST", pending.body.toString().toByteArray(), url = pending.url)))
+            identity.update(*pending.completed(result))
+            connected.value = true; server.value = pending.url; deviceId.value = identity.value("deviceId"); cursor = -1; error.value = null
+            updateBackgroundSync(); if (active) connectSocket()
+        } catch (e: ApiException) {
+            if (e.status in listOf(400, 401, 409)) { identity.update("enrollment" to ""); updateBackgroundSync() }
+            throw e
+        }
     }
     suspend fun invite(): String = withContext(Dispatchers.IO) {
         sync()
@@ -231,6 +244,7 @@ class Repository(private val context: Context) {
         mutex.withLock {
             try {
                 refresh()
+                if (!identity.connected) finishEnrollment()
                 if (!identity.connected) return@withLock true
                 if (prefs.getBoolean("clearPending", false)) { request("/v1/items", "DELETE"); prefs.edit().remove("clearPending").commit() }
                 for (id in dao.deletions()) { request("/v1/items/$id", "DELETE"); dao.deleted(id) }

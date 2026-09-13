@@ -80,17 +80,19 @@ class Identity(context: Context) {
     private val protector: SecretKey = (keyStore.getKey("dev.midplane.zap.identity", null) as? SecretKey) ?: KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").apply {
         init(KeyGenParameterSpec.Builder("dev.midplane.zap.identity", KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT).setBlockModes(KeyProperties.BLOCK_MODE_GCM).setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE).build())
     }.generateKey()
-    private val state: JSONObject = prefs.getString("encrypted", null)?.let { JSONObject(String(Crypto.open(it.unb64(), protector, "identity"))) } ?: run {
+    private var state: JSONObject = prefs.getString("encrypted", null)?.let { JSONObject(String(Crypto.open(it.unb64(), protector, "identity"))) } ?: run {
         val (private, public) = Crypto.identity()
         JSONObject().put("private", private.b64()).put("public", public.b64()).put("localKey", Crypto.randomKey().b64()).put("keys", JSONObject()).put("url", "").put("token", "").put("deviceId", "").put("keyId", "")
     }
     init { save() }
-    @Synchronized fun save() { check(prefs.edit().putString("encrypted", Crypto.seal(state.toString().toByteArray(), protector, "identity").b64()).commit()) { "Could not save device keys" } }
+    private fun persist(value: JSONObject) { check(prefs.edit().putString("encrypted", Crypto.seal(value.toString().toByteArray(), protector, "identity").b64()).commit()) { "Could not save device keys" } }
+    @Synchronized fun save() { persist(state) }
     @Synchronized fun value(name: String): String = state.optString(name)
     @Synchronized fun put(name: String, value: Any) { state.put(name, value) }
     @Synchronized fun update(vararg entries: Pair<String, Any>) {
-        for ((name, value) in entries) state.put(name, value)
-        save()
+        val next = JSONObject(state.toString())
+        for ((name, value) in entries) next.put(name, value)
+        persist(next); state = next
     }
     @Synchronized fun hasKey(keyId: String): Boolean = state.getJSONObject("keys").has(keyId)
     @Synchronized fun putKey(keyId: String, key: ByteArray) { state.getJSONObject("keys").put(keyId, key.b64()) }
@@ -100,6 +102,7 @@ class Identity(context: Context) {
         return keys.getString(keyId).unb64()
     }
     @Synchronized fun keys(): JSONObject = JSONObject(state.getJSONObject("keys").toString())
+    @Synchronized fun enrollment(): PendingEnrollment? = value("enrollment").takeIf { it.isNotEmpty() }?.let { PendingEnrollment(JSONObject(it)) }
     val connected get() = value("token").isNotEmpty()
     val localKey get() = value("localKey").unb64()
 }

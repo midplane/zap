@@ -6,7 +6,6 @@ struct RemoteItem: Decodable { var id: String; var keyId: String; var createdAt:
 struct RemoteDevice: Decodable, Identifiable { var id: String; var name: String; var publicKey: String }
 struct RemoteKey: Decodable { var keyId: String; var envelope: Envelope }
 struct Snapshot: Decodable { var cursor: Int; var days: Int; var keyId: String; var keys: [RemoteKey]; var devices: [RemoteDevice]; var items: [RemoteItem]? }
-struct Credentials: Decodable { var deviceId: String; var token: String; var keyId: String }
 struct PairCode: Codable { var url: String; var token: String; var keyId: String; var keys: [String: String] }
 
 @MainActor final class Model: ObservableObject {
@@ -26,6 +25,7 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
     let store: Store
     private var cursor = -1
     private var syncing = false
+    private var enrolling = false
     private var timer: Timer?
     private var syncTimer: Timer?
     private var socket: URLSessionWebSocketTask?
@@ -138,23 +138,44 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
     }
     func json(_ value: Any) throws -> Data { try JSONSerialization.data(withJSONObject: value) }
     func envelopeJSON(_ envelope: Envelope) throws -> Any { try JSONSerialization.jsonObject(with: JSONEncoder().encode(envelope)) }
+    private func stage(_ enrollment: PendingEnrollment) throws {
+        var next = identity; next.enrollment = enrollment
+        try VaultCrypto.saveSecret(JSONEncoder().encode(next)); identity = next
+    }
+    private func finishEnrollment() async throws {
+        guard let pending = identity.enrollment else { return }
+        guard !enrolling else { throw ZapError("Connection is already in progress.") }
+        enrolling = true; defer { enrolling = false }
+        do {
+            let response = try await request(pending.path, method: "POST", body: pending.body, credential: pending.credential, endpoint: pending.url)
+            let next = try pending.completed(identity, response: response)
+            try VaultCrypto.saveSecret(JSONEncoder().encode(next)); identity = next
+            connected = true; error = nil; retryAt = .distantPast
+        } catch let error as APIError where [400, 401, 409].contains(error.status) {
+            // A definitive rejection permits a new attempt. Transport/storage failures retain the request.
+            var next = identity; next.enrollment = nil
+            try VaultCrypto.saveSecret(JSONEncoder().encode(next)); identity = next
+            throw error
+        }
+    }
     func setup(url: String, token: String) async {
         do {
             guard !connected else { throw ZapError("Disconnect before connecting to another server.") }
             let endpoint = url.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
             guard let parsed = URL(string: endpoint), parsed.scheme == "https" || (parsed.scheme == "http" && ["localhost", "127.0.0.1"].contains(parsed.host ?? "")) else { throw ZapError("Use an HTTPS server URL.") }
             guard let key = identity.keys[identity.keyId] else { throw ZapError("The encryption key is missing.") }
-            let envelope = try VaultCrypto.wrap(key, for: identity.publicKey, keyId: identity.keyId)
-            let data = try await request("/v1/bootstrap", method: "POST", body: json(["name": Host.current().localizedName ?? "Mac", "publicKey": identity.publicKey, "keyId": identity.keyId, "envelope": envelopeJSON(envelope)]), credential: token, endpoint: endpoint)
-            let auth = try JSONDecoder().decode(Credentials.self, from: data)
-            identity.url = endpoint; identity.token = auth.token; identity.deviceId = auth.deviceId
-            try persist(); connected = true; error = nil; retryAt = .distantPast
+            if identity.enrollment == nil {
+                let envelope = try VaultCrypto.wrap(key, for: identity.publicKey, keyId: identity.keyId)
+                try stage(PendingEnrollment(url: endpoint, path: "/v1/bootstrap", credential: token, registration: ["name": Host.current().localizedName ?? "Mac", "publicKey": identity.publicKey, "keyId": identity.keyId, "envelope": envelopeJSON(envelope)], keys: identity.keys, keyId: identity.keyId))
+            }
+            try await finishEnrollment()
             await sync(); connectSocket()
         } catch let error as APIError where error.status == 409 {
             self.error = "This server already has a history. Get a pairing code from a connected device, then choose Join existing history."
         } catch { self.error = error.localizedDescription }
     }
     func disconnect() async {
+        guard !enrolling else { error = "Wait for the connection attempt to finish."; return }
         guard !syncing else { error = "Wait for the current sync to finish, then disconnect."; return }
         var warning: String?
         if connected {
@@ -174,7 +195,7 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
         for var clip in clips { clip.pending = true; try store.save(clip) }
         for id in try store.deletions() { try store.deleted(id) }
         let keyId = UUID().uuidString
-        identity.url = ""; identity.token = ""; identity.deviceId = ""
+        identity.url = ""; identity.token = ""; identity.deviceId = ""; identity.enrollment = nil
         identity.keyId = keyId; identity.keys = [keyId: VaultCrypto.randomKey()]
         try persist(); connected = false; devices = []; pairingCode = nil; cursor = -1
         syncRequested = false; forceRequested = false; retryAt = .distantPast; retryDelay = 2
@@ -185,6 +206,7 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
     func join(code: String) async {
         do {
             guard !connected else { throw ZapError("Disconnect before joining another history.") }
+            if identity.enrollment != nil { try await finishEnrollment(); await sync(); connectSocket(); return }
             guard code.hasPrefix("zap://pair#") else { throw ZapError("Enter a pairing code from an existing device.") }
             var encoded = String(code.dropFirst(11)).replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
             encoded += String(repeating: "=", count: (4 - encoded.count % 4) % 4)
@@ -197,9 +219,8 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
             var envelopes: [String: Any] = [:]
             for (keyId, key) in keys { envelopes[keyId] = try envelopeJSON(VaultCrypto.wrap(key, for: identity.publicKey, keyId: keyId)) }
             guard let envelope = envelopes[pairing.keyId] else { throw ZapError("Pairing key is missing.") }
-            let auth = try JSONDecoder().decode(Credentials.self, from: await request("/v1/pair", method: "POST", body: json(["token": pairing.token, "name": Host.current().localizedName ?? "Mac", "publicKey": identity.publicKey, "keyId": pairing.keyId, "envelope": envelope, "historyEnvelopes": envelopes]), credential: "", endpoint: pairing.url))
-            identity.url = pairing.url; identity.token = auth.token; identity.deviceId = auth.deviceId; identity.keyId = pairing.keyId; identity.keys = keys
-            try persist(); connected = true; error = nil; retryAt = .distantPast; await sync(); connectSocket()
+            try stage(PendingEnrollment(url: pairing.url, path: "/v1/pair", registration: ["token": pairing.token, "name": Host.current().localizedName ?? "Mac", "publicKey": identity.publicKey, "keyId": pairing.keyId, "envelope": envelope, "historyEnvelopes": envelopes], keys: keys, keyId: pairing.keyId))
+            try await finishEnrollment(); await sync(); connectSocket()
         } catch { self.error = error.localizedDescription }
     }
     func invite() async {
@@ -221,6 +242,11 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
         } catch { self.error = error.localizedDescription }
     }
     func sync(force: Bool = false) async {
+        if !connected, identity.enrollment != nil {
+            guard !enrolling else { return }
+            do { try await finishEnrollment(); connectSocket() }
+            catch { self.error = error.localizedDescription; return }
+        }
         guard !syncing else { syncRequested = true; forceRequested = forceRequested || force; return }
         if !connected {
             do { try reload() } catch { self.error = error.localizedDescription }
