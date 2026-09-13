@@ -86,6 +86,7 @@ class MainActivity : ComponentActivity() {
     val clips by repo.clips.collectAsStateWithLifecycle()
     val status by repo.status.collectAsStateWithLifecycle()
     val error by repo.error.collectAsStateWithLifecycle()
+    val recovery by repo.recovery.collectAsStateWithLifecycle()
     val connected by repo.connected.collectAsStateWithLifecycle()
     var search by remember { mutableStateOf("") }
     var filter by remember { mutableStateOf("All") }
@@ -146,6 +147,7 @@ class MainActivity : ComponentActivity() {
                 }
                 val pending = clips.count { it.pending }
                 Text(if (connected && pending > 0) "$pending waiting to sync" else status, Modifier.padding(start = 24.dp, end = 24.dp, bottom = 8.dp), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (recovery != null) TextButton(onClick = { settings = true }, modifier = Modifier.padding(horizontal = 16.dp)) { Text("Some items need recovery") }
                 val filtered = clips.filter { (filter == "All" || it.kind == if (filter == "Text") "text" else "image") && (search.isBlank() || it.text.contains(search, true) || it.source.contains(search, true)) }
                 if (filtered.isEmpty()) {
                     Column(Modifier.weight(1f).fillMaxWidth().padding(32.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
@@ -210,6 +212,8 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable private fun SettingsContent(repo: Repository, onScan: () -> Unit, onManual: () -> Unit, onAction: (suspend () -> Unit) -> Unit) {
+    val recovery by repo.recovery.collectAsStateWithLifecycle()
+    val damagedCount by repo.damagedCount.collectAsStateWithLifecycle()
     val days by repo.days.collectAsStateWithLifecycle()
     val connected by repo.connected.collectAsStateWithLifecycle()
     val devices by repo.devices.collectAsStateWithLifecycle()
@@ -218,6 +222,7 @@ class MainActivity : ComponentActivity() {
     val self by repo.deviceId.collectAsStateWithLifecycle()
     var retention by remember(days) { mutableStateOf(days.toString()) }
     var clearing by remember { mutableStateOf(false) }
+    var discarding by remember { mutableStateOf(false) }
     var disconnecting by remember { mutableStateOf(false) }
     var invitation by remember { mutableStateOf<String?>(null) }
     val context = LocalContext.current
@@ -231,6 +236,11 @@ class MainActivity : ComponentActivity() {
                 TextButton(onClick = { onAction { repo.setDays(retention.toInt()) } }, enabled = retention.toIntOrNull() in 1..365 && retention != days.toString()) { Text("Save") }
             }
             TextButton(onClick = { clearing = true }) { Text("Clear history", color = MaterialTheme.colorScheme.error) }
+            recovery?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall)
+                TextButton(onClick = { onAction { repo.sync() } }) { Text("Retry recovery") }
+                if (damagedCount > 0) TextButton(onClick = { discarding = true }) { Text("Discard damaged items", color = MaterialTheme.colorScheme.error) }
+            }
         }
         item { HorizontalDivider() }
         item {
@@ -266,6 +276,7 @@ class MainActivity : ComponentActivity() {
     invitation?.let { code -> AlertDialog(onDismissRequest = { invitation = null }, title = { Text("Pair another device") }, text = { Text("Copy this private code and enter it in Zap on the new device. It expires in five minutes.") }, confirmButton = { TextButton(onClick = { context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Pairing code", code)); invitation = null }) { Text("Copy code") } }, dismissButton = { TextButton(onClick = { invitation = null }) { Text("Cancel") } }) }
     if (disconnecting) AlertDialog(onDismissRequest = { disconnecting = false }, title = { Text("Disconnect?") }, text = { Text("Local history stays on this phone and will upload when you connect again.") }, confirmButton = { TextButton(onClick = { disconnecting = false; onAction { repo.disconnect() } }) { Text("Disconnect") } }, dismissButton = { TextButton(onClick = { disconnecting = false }) { Text("Cancel") } })
     if (clearing) AlertDialog(onDismissRequest = { clearing = false }, title = { Text("Clear history?") }, text = { Text(if (connected) "History will be deleted on all connected devices when they sync." else "History will be deleted from this phone.") }, confirmButton = { TextButton(onClick = { clearing = false; onAction { repo.clear() } }) { Text("Clear history") } }, dismissButton = { TextButton(onClick = { clearing = false }) { Text("Cancel") } })
+    if (discarding) AlertDialog(onDismissRequest = { discarding = false }, title = { Text("Discard damaged items?") }, text = { Text(if (connected) "Unreadable items will be deleted here and on paired devices when you sync. Healthy items stay." else "Unreadable items will be permanently deleted from this phone. Healthy items stay.") }, confirmButton = { TextButton(onClick = { discarding = false; onAction { repo.discardDamaged() } }) { Text("Discard") } }, dismissButton = { TextButton(onClick = { discarding = false }) { Text("Cancel") } })
     remove?.let { id -> AlertDialog(onDismissRequest = { remove = null }, title = { Text("Remove this device?") }, text = { Text("It will no longer receive new items. Content already downloaded remains on that device.") }, confirmButton = { TextButton(onClick = { remove = null; onAction { repo.removeDevice(id) } }) { Text("Remove") } }, dismissButton = { TextButton(onClick = { remove = null }) { Text("Cancel") } }) }
 }
 

@@ -21,6 +21,8 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
     @Published var settingsOpen = false
     @Published var preview: Clip?
     @Published var connected = false
+    @Published var recovery: String?
+    private var unavailableIDs = Set<String>()
     var identity: Identity
     let store: Store
     private var cursor = -1
@@ -59,7 +61,17 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
         Task { await sync(); connectSocket() }
     }
     func persist() throws { try VaultCrypto.saveSecret(JSONEncoder().encode(identity)) }
-    func reload() throws { try store.expire(days: days); clips = try store.all() }
+    func reload() throws {
+        try store.expire(days: days); clips = try store.all()
+        let count = store.damagedIDs.union(unavailableIDs).count
+        recovery = count == 0 ? nil : "Unable to read \(count) saved \(count == 1 ? "item" : "items"). Synced content retries automatically. Damaged local records are kept for recovery."
+    }
+    func discardDamaged() {
+        do {
+            for id in store.damagedIDs { try store.remove(id, queue: connected) }
+            try reload(); Task { await sync(force: true) }
+        } catch { self.error = error.localizedDescription }
+    }
     func ignoreCurrentClipboard() { changeCount = NSPasteboard.general.changeCount }
     func capture() {
         let board = NSPasteboard.general
@@ -111,7 +123,8 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
     }
     func clear() {
         do {
-            for clip in clips { try store.remove(clip.id) }
+            for record in try store.records() { try store.remove(record.id) }
+            unavailableIDs = []
             UserDefaults.standard.set(connected, forKey: "clearPending")
             try reload(); Task { await sync() }
         } catch { self.error = error.localizedDescription }
@@ -192,7 +205,7 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
     private func forget(_ message: String?) throws {
         socketLoop?.cancel(); socketLoop = nil; socket?.cancel(with: .goingAway, reason: nil)
         syncRetry?.cancel(); syncRetry = nil
-        for var clip in clips { clip.pending = true; try store.save(clip) }
+        try store.markAllPending(); unavailableIDs = []
         for id in try store.deletions() { try store.deleted(id) }
         let keyId = UUID().uuidString
         identity.url = ""; identity.token = ""; identity.deviceId = ""; identity.enrollment = nil
@@ -260,6 +273,7 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
         }
         do {
             try reload()
+            unavailableIDs = []
             if UserDefaults.standard.bool(forKey: "clearPending") {
                 _ = try await request("/v1/items", method: "DELETE"); UserDefaults.standard.removeObject(forKey: "clearPending")
             }
@@ -269,7 +283,8 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
                 _ = try await request("/v1/settings", method: "PUT", body: json(["days": requestedDays]))
                 if days == requestedDays { UserDefaults.standard.removeObject(forKey: "daysPending") }
             }
-            let snapshot = try JSONDecoder().decode(Snapshot.self, from: await request("/v1/sync?cursor=\(cursor)"))
+            let requestedCursor = store.damagedIDs.isEmpty ? cursor : -1
+            let snapshot = try JSONDecoder().decode(Snapshot.self, from: await request("/v1/sync?cursor=\(requestedCursor)"))
             var identityChanged = identity.keyId != snapshot.keyId
             for entry in snapshot.keys where identity.keys[entry.keyId] == nil { identity.keys[entry.keyId] = try VaultCrypto.unwrap(entry.envelope, privateKey: identity.privateKey, keyId: entry.keyId); identityChanged = true }
             guard let currentKey = identity.keys[snapshot.keyId], currentKey.count == 32, (1...365).contains(snapshot.days) else { throw ZapError("The server returned invalid sync settings.") }
@@ -277,19 +292,23 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
             if !UserDefaults.standard.bool(forKey: "daysPending"), days != snapshot.days { days = snapshot.days; UserDefaults.standard.set(days, forKey: "days") }
             if let items = snapshot.items {
                 let remoteIDs = Set(items.map(\.id))
-                for clip in clips where !clip.pending && !remoteIDs.contains(clip.id) { try store.remove(clip.id) }
+                for record in try store.records() where !record.pending && !remoteIDs.contains(record.id) { try store.remove(record.id) }
                 let localIDs = Set(clips.map(\.id)), deleted = Set(try store.deletions())
                 for item in items where !localIDs.contains(item.id) && !deleted.contains(item.id) {
-                    guard let key = identity.keys[item.keyId] else { throw ZapError("An encryption key is missing. Pair this device again.") }
                     do {
+                        guard let key = identity.keys[item.keyId] else { throw ZapError("An encryption key is missing. Pair this device again.") }
                         let encrypted = try await request("/v1/items/\(item.id)")
                         let payload = try JSONDecoder().decode(Payload.self, from: VaultCrypto.open(encrypted, key: key, aad: item.id))
                         guard payload.createdAt == item.createdAt else { throw ZapError("Content metadata did not match.") }
                         if !(try store.deletions()).contains(item.id) { try store.save(Clip(id: item.id, payload: payload, pending: false)) }
-                    } catch let error as APIError where error.status == 404 { continue }
+                    } catch let error as APIError where error.status == 401 { throw error }
+                    catch let error as APIError where error.status == 404 { continue }
+                    catch is CancellationError { throw CancellationError() }
+                    catch let error as URLError { throw error }
+                    catch { unavailableIDs.insert(item.id) }
                 }
             }
-            cursor = snapshot.cursor
+            cursor = unavailableIDs.isEmpty ? snapshot.cursor : -1
             try reload()
             for clip in clips where clip.pending {
                 let encrypted = try VaultCrypto.seal(JSONEncoder().encode(clip.payload), key: currentKey, aad: clip.id)
@@ -298,7 +317,7 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
                     try store.sent(clip.id)
                 } catch let error as APIError where error.status == 410 { try store.remove(clip.id) }
             }
-            try reload(); status = "Up to date"; error = nil; retryDelay = 2; retryAt = .distantPast
+            try reload(); status = recovery == nil ? "Up to date" : "Some items need recovery"; error = nil; retryDelay = 2; retryAt = .distantPast
             syncRetry?.cancel(); syncRetry = nil
         } catch let error as APIError where error.status == 401 {
             do { try forget("This Mac is no longer paired. Join your history again with a code from a connected device.") }

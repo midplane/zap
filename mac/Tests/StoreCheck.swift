@@ -1,8 +1,10 @@
 import Foundation
+import SQLite3
 
 @main struct StoreCheck {
     static func main() throws {
         try enrollmentRecovery()
+        try corruptionRecovery()
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let key = VaultCrypto.randomKey()
@@ -53,6 +55,39 @@ import Foundation
             _ = try pending.completed(restored, response: Data("{\"deviceId\":\"different\",\"token\":\"wrong\",\"keyId\":\"wrong\"}".utf8))
             fatalError("Accepted a mismatched enrollment response")
         } catch {}
+    }
+    static func corruptionRecovery() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let key = VaultCrypto.randomKey(), store = try Store(key: key, directory: directory)
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        let healthy = Clip(id: UUID().uuidString, payload: Payload(kind: "text", text: "Healthy", source: "Test", createdAt: now), pending: false)
+        var damaged = healthy; damaged.id = UUID().uuidString
+        var unsent = healthy; unsent.id = UUID().uuidString; unsent.pending = true; unsent.payload.createdAt = 0
+        var malformed = healthy; malformed.id = UUID().uuidString
+        for clip in [healthy, damaged, unsent, malformed] { try store.save(clip) }
+        var db: OpaquePointer?
+        precondition(sqlite3_open(directory.appendingPathComponent("history.sqlite").path, &db) == SQLITE_OK)
+        defer { sqlite3_close(db) }
+        precondition(sqlite3_exec(db, "UPDATE clips SET payload='broken' WHERE id IN ('\(damaged.id)','\(unsent.id)')", nil, nil, nil) == SQLITE_OK)
+        let invalid = try VaultCrypto.seal(Data("{}".utf8), key: key, aad: malformed.id).base64EncodedString()
+        precondition(sqlite3_exec(db, "UPDATE clips SET payload='\(invalid)' WHERE id='\(malformed.id)'", nil, nil, nil) == SQLITE_OK)
+        let reopened = try Store(key: key, directory: directory)
+        let loaded = try reopened.all()
+        precondition(loaded.map(\.id) == [healthy.id] && reopened.damagedIDs.count == 3)
+        try reopened.expire(days: 1)
+        let records = try reopened.records()
+        precondition(records.count == 4 && records.contains(where: { $0.id == unsent.id && $0.pending }))
+        let restarted = try Store(key: key, directory: directory)
+        _ = try restarted.all(); precondition(restarted.damagedIDs.count == 3)
+        // A valid redownload repairs one row without losing unreadable unsent content.
+        try restarted.save(damaged)
+        let repaired = try restarted.all()
+        precondition(repaired.count == 2 && restarted.damagedIDs.count == 2)
+        try restarted.markAllPending()
+        let pending = try restarted.records(); precondition(pending.allSatisfy(\.pending))
+        for id in restarted.damagedIDs { try restarted.remove(id) }
+        let remaining = try restarted.records(); precondition(remaining.count == 2)
     }
     static func expect(_ store: Store, text: String, pending: Bool) throws {
         let clips = try store.all()

@@ -45,7 +45,8 @@ class Repository(private val context: Context) {
     private val mutex = Mutex()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val syncRequests = SyncRequests(scope) { sync() }
-    private val payloads = mutableMapOf<String, JSONObject>()
+    private val payloads = PayloadFiles(directory, identity.localKey)
+    private val unavailableIds = mutableSetOf<String>()
     private var nextCacheCleanup = 0L
     private var socket: WebSocket? = null
     private var active = false
@@ -56,20 +57,18 @@ class Repository(private val context: Context) {
     val days = MutableStateFlow(prefs.getInt("days", 10))
     val status = MutableStateFlow(if (identity.connected) "Connecting…" else "Local history")
     val error = MutableStateFlow<String?>(null)
+    val recovery = MutableStateFlow<String?>(null)
+    val damagedCount = MutableStateFlow(0)
     val devices = MutableStateFlow<List<JSONObject>>(emptyList())
     val connected = MutableStateFlow(identity.connected)
     val server = MutableStateFlow(identity.value("url"))
     val deviceId = MutableStateFlow(identity.value("deviceId"))
     init { scope.launch { mutex.withLock { try { refresh() } catch (e: Exception) { error.value = e.message } } } }
     private suspend fun save(clip: Clip) {
-        val file = File(directory, clip.id)
-        val temp = File(directory, "${clip.id}.tmp")
-        temp.writeBytes(Crypto.seal(clip.payload.toString().toByteArray(), identity.localKey, clip.id))
-        check(temp.renameTo(file)) { "Could not save history" }
+        payloads.save(clip.id, clip.payload)
         dao.save(StoredClip(clip.id, clip.createdAt, clip.pending))
-        payloads[clip.id] = clip.payload
     }
-    private suspend fun removeLocal(id: String) { dao.remove(id); File(directory, id).delete(); payloads.remove(id) }
+    private suspend fun removeLocal(id: String) { payloads.remove(id); dao.remove(id) }
     private suspend fun refresh() {
         val now = System.currentTimeMillis()
         if (now >= nextCacheCleanup) {
@@ -78,13 +77,15 @@ class Repository(private val context: Context) {
         }
         val cutoff = now - days.value * 86_400_000L
         val stored = dao.all()
-        for (clip in stored.filter { it.createdAt <= cutoff }) removeLocal(clip.id)
+        val readable = payloads.readAll(stored.map { it.id }.toSet())
+        for (clip in stored.filter { it.createdAt <= cutoff && it.id !in payloads.damaged }) removeLocal(clip.id)
         val retained = stored.filter { it.createdAt > cutoff }
-        payloads.keys.retainAll(retained.map { it.id }.toSet())
-        clips.value = retained.map {
-            val payload = payloads.getOrPut(it.id) { JSONObject(String(Crypto.open(File(directory, it.id).readBytes(), identity.localKey, it.id))) }
-            Clip(it.id, it.createdAt, payload, it.pending)
+        clips.value = retained.mapNotNull { record ->
+            readable[record.id]?.let { Clip(record.id, record.createdAt, it, record.pending) }
         }
+        damagedCount.value = payloads.damaged.size
+        val count = (payloads.damaged + unavailableIds).size
+        recovery.value = if (count == 0) null else "Unable to read $count saved ${if (count == 1) "item" else "items"}. Synced content retries automatically. Damaged local records are kept for recovery."
     }
     fun updateBackgroundSync() {
         val manager = WorkManager.getInstance(context)
@@ -145,6 +146,13 @@ class Repository(private val context: Context) {
         mutex.withLock {
             prefs.edit().putBoolean("clearPending", identity.connected).commit()
             for (clip in dao.all()) removeLocal(clip.id)
+            unavailableIds.clear()
+            refresh()
+        }; enqueue()
+    }
+    suspend fun discardDamaged() = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            for (id in payloads.damaged.toList()) { if (identity.connected) dao.queue(Deletion(id)); removeLocal(id) }
             refresh()
         }; enqueue()
     }
@@ -224,7 +232,7 @@ class Repository(private val context: Context) {
     /** Return to local-only history, keeping everything captured here for the next server. */
     private suspend fun forget(message: String?) {
         socket?.close(1000, null); socket = null; reconnect?.cancel()
-        for (clip in clips.value) save(clip.copy(pending = true))
+        dao.markAllPending(); unavailableIds.clear()
         for (id in dao.deletions()) dao.deleted(id)
         identity.update("url" to "", "token" to "", "deviceId" to "", "keyId" to "", "keys" to JSONObject())
         connected.value = false; server.value = ""; deviceId.value = ""; cursor = -1; devices.value = emptyList()
@@ -244,12 +252,14 @@ class Repository(private val context: Context) {
         mutex.withLock {
             try {
                 refresh()
+                unavailableIds.clear()
                 if (!identity.connected) finishEnrollment()
                 if (!identity.connected) return@withLock true
                 if (prefs.getBoolean("clearPending", false)) { request("/v1/items", "DELETE"); prefs.edit().remove("clearPending").commit() }
                 for (id in dao.deletions()) { request("/v1/items/$id", "DELETE"); dao.deleted(id) }
                 if (prefs.getBoolean("daysPending", false)) { request("/v1/settings", "PUT", JSONObject().put("days", days.value).toString().toByteArray()); prefs.edit().remove("daysPending").commit() }
-                val state = JSONObject(String(request("/v1/sync?cursor=$cursor")))
+                val requestedCursor = if (payloads.damaged.isEmpty()) cursor else -1L
+                val state = JSONObject(String(request("/v1/sync?cursor=$requestedCursor")))
                 val keys = state.getJSONArray("keys")
                 var identityChanged = identity.value("keyId") != state.getString("keyId")
                 for (i in 0 until keys.length()) {
@@ -262,24 +272,27 @@ class Repository(private val context: Context) {
                 if (!state.isNull("items")) {
                     val array = state.getJSONArray("items"); val items = (0 until array.length()).map { array.getJSONObject(it) }
                     val remoteIds = items.map { it.getString("id") }.toSet(); val localIds = clips.value.map { it.id }.toSet()
-                    for (clip in clips.value.filter { !it.pending && it.id !in remoteIds }) removeLocal(clip.id)
+                    for (clip in dao.all().filter { !it.pending && it.id !in remoteIds }) removeLocal(clip.id)
                     for (item in items.filter { it.getString("id") !in localIds }) {
                         val id = item.getString("id")
                         try {
                             val raw = Crypto.open(request("/v1/items/$id"), identity.key(item.getString("keyId")), id)
                             val payload = JSONObject(String(raw)); require(payload.getLong("createdAt") == item.getLong("createdAt")) { "Content metadata did not match" }
                             save(Clip(id, item.getLong("createdAt"), payload, false))
-                        } catch (e: ApiException) { if (e.status != 404) throw e }
+                        } catch (e: CancellationException) { throw e }
+                        catch (e: ApiException) { if (e.status == 401) throw e; if (e.status != 404) unavailableIds.add(id) }
+                        catch (e: java.io.IOException) { throw e }
+                        catch (e: Exception) { unavailableIds.add(id) }
                     }
                 }
-                cursor = state.getLong("cursor"); refresh()
+                cursor = if (unavailableIds.isEmpty()) state.getLong("cursor") else -1L; refresh()
                 for (clip in clips.value.filter { it.pending }) {
                     val keyId = identity.value("keyId")
                     val encrypted = Crypto.seal(clip.payload.toString().toByteArray(), identity.key(keyId), clip.id)
                     try { request("/v1/items/${clip.id}", "PUT", encrypted, mapOf("X-Key-Id" to keyId, "X-Created-At" to clip.createdAt.toString())); dao.sent(clip.id) }
                     catch (e: ApiException) { if (e.status == 410) removeLocal(clip.id) else throw e }
                 }
-                refresh(); status.value = "Up to date"; error.value = null; true
+                refresh(); status.value = if (recovery.value == null) "Up to date" else "Some items need recovery"; error.value = null; true
             } catch (e: CancellationException) { throw e }
             catch (e: ApiException) {
                 if (e.status == 401) forget("This phone is no longer paired. Scan a new pairing code to rejoin your history.")

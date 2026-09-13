@@ -43,8 +43,12 @@ The updated Mac app reached “Up to date” from `/Applications`. The updated A
 
 Backend integration checks cover retrying committed enrollment, concurrent identical pairing, changed requests, one-use invitations for other clients, revoked retries, and bootstrap after reset. Native checks round-trip the persisted pending request through serialization and verify that preparing connected state leaves the retry record intact until secure persistence succeeds. Backend type-check/tests, Mac store checks/build, and Android unit tests/debug assembly pass. Actual Keychain/Keystore write failures and native process termination during a live enrollment have not been fault-injected.
 
+## OSS record-recovery checks, 13 September 2026
+
+Mac store checks inject corrupt ciphertext and encrypted malformed payloads, reopen history, verify healthy items still load, retain expired damaged unsent rows, repair a row, preserve pending flags on disconnect, and explicitly discard damaged rows. Android file-store tests cover missing files, corrupt ciphertext, malformed payloads, restart, repair, and explicit removal. Tests use temporary synthetic stores. They do not establish recovery from a damaged database file or lost identity keys.
+
 ## Not established
 
 `DELETE /v1/devices/me` has only been exercised by the local integration test. Neither native client's disconnect path, nor the 401 re-pairing path, has been run against a deployed Worker, and no backend changes were deployed. Uploads now stream into R2 through a fixed-length stream; a real multi-megabyte upload against R2 has not been re-run.
 
-Large-history performance, interrupted share imports, storage corruption recovery, physical-phone battery/OEM behavior, Android 10 hardware, Intel Mac builds, actual login startup, release signing/notarization, OS screen-reader traversal, tablets/foldables, and production failure recovery remain unverified. See [production-readiness.md](production-readiness.md) for prioritized findings.
+Large-history performance, interrupted share imports, whole-database corruption and identity-key loss recovery, physical-phone battery/OEM behavior, Android 10 hardware, Intel Mac builds, actual login startup, release signing/notarization, OS screen-reader traversal, tablets/foldables, and production failure recovery remain unverified. See [production-readiness.md](production-readiness.md) for prioritized findings.

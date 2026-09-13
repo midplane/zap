@@ -72,6 +72,7 @@ struct HistoryView: View {
             HStack(spacing: 6) {
                 Circle().fill(model.status == "Up to date" ? Color.green : Color.secondary).frame(width: 5, height: 5)
                 Text(model.pendingCount > 0 && model.connected ? "\(model.pendingCount) pending" : model.status)
+                if model.recovery != nil { Button("Some items need recovery") { model.settingsOpen = true } }
                 Spacer()
                 Text("↑↓ navigate    Space preview    ↵ paste").foregroundStyle(Color.zapSecondary)
             }.font(.caption).foregroundStyle(Color.zapSecondary).padding(.horizontal, 20).padding(.vertical, 12)
@@ -137,6 +138,7 @@ struct SettingsView: View {
     @State private var joinCode = ""
     @State private var disconnecting = false
     @State private var clearing = false
+    @State private var discarding = false
     @State private var removing: RemoteDevice?
     @State private var startup = SMAppService.mainApp.status == .enabled
     @State private var shortcut = UserDefaults.standard.string(forKey: "shortcut") ?? "option-space"
@@ -147,6 +149,11 @@ struct SettingsView: View {
                 Section("History") {
                     Stepper("Keep for \(model.days) days", value: Binding(get: { model.days }, set: { model.setDays($0) }), in: 1...365)
                     Button("Clear history…", role: .destructive) { clearing = true }
+                    if let recovery = model.recovery {
+                        Text(recovery).font(.caption)
+                        Button("Retry recovery") { Task { await model.sync(force: true) } }
+                        if !model.store.damagedIDs.isEmpty { Button("Discard damaged items…", role: .destructive) { discarding = true } }
+                    }
                 }
                 Section("Mac") {
                     Toggle("Launch at login", isOn: $startup).onChange(of: startup) { _, value in
@@ -191,6 +198,7 @@ struct SettingsView: View {
         } message: { _ in Text("It will no longer receive new items. Content already downloaded remains on that device.") }
         .confirmationDialog("Disconnect from this server? This Mac's access is revoked. Local history stays here and will upload when you connect again.", isPresented: $disconnecting) { Button("Disconnect") { Task { await model.disconnect() } } }
         .confirmationDialog(model.connected ? "Clear history on all connected devices?" : "Clear history on this Mac?", isPresented: $clearing) { Button("Clear history", role: .destructive) { model.clear() } }
+        .confirmationDialog(model.connected ? "Discard unreadable items here and on paired devices when you sync? Healthy items stay." : "Permanently discard unreadable items from this Mac? Healthy items stay.", isPresented: $discarding) { Button("Discard damaged items", role: .destructive) { model.discardDamaged() } }
     }
 }
 private struct PairingView: View {

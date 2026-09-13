@@ -95,6 +95,8 @@ All content is AES-256-GCM encrypted before upload. P-256 ECDH envelopes deliver
 
 Device removal revokes access and rotates encryption for future captures. It cannot erase content already downloaded to another device. An existing device can enroll a replacement; losing every paired device means starting with a fresh deployment/history. Do not delete encryption keys while keeping a local database you want to read.
 
+Unreadable records are isolated so healthy history remains usable. Settings shows recovery status, retries, and an explicit **Discard damaged items** action. Synced records are downloaded again automatically. Unsent damaged records remain encrypted in local storage, including past their retention date, until repaired or explicitly discarded. Discarding while connected also queues deletion on paired devices; **Clear history** includes damaged records.
+
 Retention removes items from active history and schedules blob cleanup. It does not guarantee forensic erasure from OS or Cloudflare backups. There is no special filtering of passwords or other sensitive clipboard content.
 
 Plain text and static images only: 1 MiB text, 20 MiB PNG, 40 megapixels. No rich text, files, pins, OCR, analytics, or compatibility layers. Apps and backend ship together.

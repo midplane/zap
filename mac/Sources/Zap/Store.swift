@@ -8,6 +8,9 @@ struct Payload: Codable {
     var png: String?
     var source: String
     var createdAt: Int64
+    func validate() throws {
+        guard (kind == "text" && text != nil) || (kind == "image" && png.flatMap({ Data(base64Encoded: $0) }) != nil) else { throw ZapError("Content is damaged.") }
+    }
 }
 struct Clip: Identifiable {
     var id: String
@@ -34,6 +37,7 @@ final class Store {
     private var db: OpaquePointer?
     private let localKey: Data
     private var cached: [String: Payload] = [:]
+    private(set) var damagedIDs = Set<String>()
     init(key: Data, directory: URL? = nil) throws {
         localKey = key
         let directory = try directory ?? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true).appendingPathComponent("dev.midplane.zap")
@@ -59,39 +63,57 @@ final class Store {
     private func rows(_ sql: String, _ args: [String] = []) throws -> [[String]] {
         let statement = try prepare(sql, args); defer { sqlite3_finalize(statement) }
         var result: [[String]] = []
-        while sqlite3_step(statement) == SQLITE_ROW {
+        var status = sqlite3_step(statement)
+        while status == SQLITE_ROW {
             result.append((0..<sqlite3_column_count(statement)).map { index in
                 guard let text = sqlite3_column_text(statement, index) else { return "" }
                 return String(cString: text)
             })
+            status = sqlite3_step(statement)
         }
+        guard status == SQLITE_DONE else { throw ZapError("Could not read local history.") }
         return result
     }
+    func records() throws -> [(id: String, pending: Bool)] { try rows("SELECT id,pending FROM clips").map { ($0[0], $0[1] == "1") } }
     func all() throws -> [Clip] {
         let records = try rows("SELECT id,pending FROM clips ORDER BY created DESC")
         let ids = Set(records.map { $0[0] }); cached = cached.filter { ids.contains($0.key) }
-        return try records.map { row in
+        damagedIDs = []
+        return records.compactMap { row in
             let id = row[0]
-            if cached[id] == nil {
-                guard let value = try rows("SELECT payload FROM clips WHERE id=?", [id]).first?.first, let encrypted = Data(base64Encoded: value) else { throw ZapError("Local history is damaged.") }
-                cached[id] = try JSONDecoder().decode(Payload.self, from: VaultCrypto.open(encrypted, key: localKey, aad: id))
+            do {
+                if cached[id] == nil {
+                    guard let value = try rows("SELECT payload FROM clips WHERE id=?", [id]).first?.first, let encrypted = Data(base64Encoded: value) else { throw ZapError("Local history is damaged.") }
+                    let payload = try JSONDecoder().decode(Payload.self, from: VaultCrypto.open(encrypted, key: localKey, aad: id))
+                    try payload.validate(); cached[id] = payload
+                }
+                guard let payload = cached[id] else { throw ZapError("Could not load local history.") }
+                return Clip(id: id, payload: payload, pending: row[1] == "1")
+            } catch {
+                // Quarantine in place: preserve the original encrypted row for repair or explicit removal.
+                damagedIDs.insert(id); return nil
             }
-            guard let payload = cached[id] else { throw ZapError("Could not load local history.") }
-            return Clip(id: id, payload: payload, pending: row[1] == "1")
         }
     }
     func save(_ clip: Clip) throws {
+        try clip.payload.validate()
         let encrypted = try VaultCrypto.seal(JSONEncoder().encode(clip.payload), key: localKey, aad: clip.id)
         try execute("INSERT OR REPLACE INTO clips VALUES(?,?,?,?)", [clip.id, String(clip.payload.createdAt), encrypted.base64EncodedString(), clip.pending ? "1" : "0"])
         cached[clip.id] = clip.payload
+        damagedIDs.remove(clip.id)
     }
     func sent(_ id: String) throws { try execute("UPDATE clips SET pending=0 WHERE id=?", [id]) }
+    func markAllPending() throws { try execute("UPDATE clips SET pending=1") }
     func remove(_ id: String, queue: Bool = false) throws {
         if queue { try execute("INSERT OR IGNORE INTO deletions VALUES(?)", [id]) }
         try execute("DELETE FROM clips WHERE id=?", [id])
         cached.removeValue(forKey: id)
+        damagedIDs.remove(id)
     }
     func deletions() throws -> [String] { try rows("SELECT id FROM deletions").map { $0[0] } }
     func deleted(_ id: String) throws { try execute("DELETE FROM deletions WHERE id=?", [id]) }
-    func expire(days: Int) throws { try execute("DELETE FROM clips WHERE created<?", [String(Int64(Date().timeIntervalSince1970 * 1000) - Int64(days) * 86_400_000)]) }
+    func expire(days: Int) throws {
+        _ = try all()
+        for row in try rows("SELECT id FROM clips WHERE created<?", [String(Int64(Date().timeIntervalSince1970 * 1000) - Int64(days) * 86_400_000)]) where !damagedIDs.contains(row[0]) { try remove(row[0]) }
+    }
 }
