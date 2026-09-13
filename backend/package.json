@@ -10,7 +10,7 @@
     "test": "node --import tsx --test test/*.test.ts"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "5.20260730.1",
+    "@cloudflare/workers-types": "5.20260910.1",
     "@types/node": "^22.0.0",
     "esbuild": "0.28.2",
     "miniflare": "4.20260730.0",
