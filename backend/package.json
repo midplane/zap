@@ -1,0 +1,25 @@
+{
+  "name": "zap-backend",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "check": "tsc --noEmit",
+    "test": "node --import tsx --test test/*.test.ts"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20260730.1",
+    "@types/node": "^22.0.0",
+    "esbuild": "0.28.2",
+    "miniflare": "4.20260730.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0",
+    "wrangler": "4.116.0"
+  },
+  "overrides": {
+    "sharp": "0.35.4",
+    "undici": "7.29.0"
+  }
+}

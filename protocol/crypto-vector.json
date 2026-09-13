@@ -1,0 +1,14 @@
+{
+  "id": "12345678-1234-1234-1234-123456789abc",
+  "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+  "plaintext": "{\"kind\":\"text\",\"text\":\"Hello, नमस्ते 👋\",\"source\":\"Fixture\",\"createdAt\":1750000000000}",
+  "sealed": "KCkqKywtLi8wMTIzm5ABrZ0LQ7/iHT9wU42mwTfbu/AN2D81NMbJx6fG5pdvAE6/OlYMjimTYzH4zSGU8WyHsrDb4ZJIriVyCPEAbvA++en59lAT+F4hqj29bCmWkby2Zpnh67jT+qYE9+FWvYLCzHx3iI7X9fS+SU2c/gaH93I=",
+  "privateKeyPKCS8": "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQguP13L+9zpzytfxmrx70A1rP799Q8Kfkl09LeVXR4vCqhRANCAASse5AXJSaieJR75VKXeJLZ2ZYeSSc4UiNO1J3uSHTG6Cf7skhcugDbmoMF+Q/k39XzaOC4QqJUfBi4s03d5Fhw",
+  "privateKeyRaw": "uP13L+9zpzytfxmrx70A1rP799Q8Kfkl09LeVXR4vCo=",
+  "publicKey": "BKx7kBclJqJ4lHvlUpd4ktnZlh5JJzhSI07Une5IdMboJ/uySFy6ANuagwX5D+Tf1fNo4LhColR8GLizTd3kWHA=",
+  "envelope": {
+    "ephemeralPublicKey": "BLCLgbzKuYgkLiJLtbJAFWNlg+qQI/9QOmqtoeZf7FOc+SthOREbsvJ5f0hAj491udqtxc9Q3qrSbYaw6NSAX3E=",
+    "nonce": "KCkqKywtLi8wMTIz",
+    "ciphertext": "7TKJw7P+TCXffN8aZvlrmB5B/UfvLfxb5DzR88IvU8tqog8w41Xj8vR3r+YcXrwN"
+  }
+}
