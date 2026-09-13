@@ -1,27 +1,11 @@
 # Verification
 
-Last updated 11 September 2026. The current identifiers are `dev.midplane.zap` on both platforms.
+Last verified 13 September 2026. Use the prerequisites in the [README](../README.md#build). Passing these checks does not establish production readiness or a clean dependency audit.
 
-## Checks run
-
-| Component | Evidence |
-| --- | --- |
-| Backend | TypeScript check and local Cloudflare integration tests pass with the updated toolchain. Tests cover setup authorization, one-use pairing, upload retries/concurrency, retrieval, cursors, deletion, expiry, revocation by a peer, self-revocation on disconnect, the last device resetting the deployment, and malformed/oversized requests. |
-| Deployment | Wrangler dry-run bundles successfully with one Durable Object and the intended R2 binding. This review did not deploy backend changes. |
-| Mac | The documented build script compiles with Swift 6.1.2/macOS 15.5 SDK, targets macOS 14, and produces an arm64 app that passes signature verification. Shared crypto vectors and tamper rejection pass. Option+Space opens and closes history. |
-| Android | Unit tests (including the shared crypto vectors, which also cover reading the curve parameters directly) and lint pass. Debug assembly, installation alongside the earlier development app on a connected Pixel 10 Pro, and that identity passing pairing and a synthetic text upload against the local backend on the emulator are from the earlier pass. |
-| Native UI | Mac history and compact pairing sheet, Android empty/populated history and settings, launcher artwork, and light/dark appearance were inspected. Android larger text was checked on the emulator. |
-
-## Earlier integration coverage
-
-Actual native clients passed text and PNG capture/share, encrypted pairing and sync in both directions against a loopback Cloudflare runtime, and Android deletion propagating to Mac. Mac Enter-to-paste succeeded in a disposable TextEdit document. Android history survived force-stop/relaunch. The test clients were disconnected and synthetic history removed after those integration checks.
-
-The Mac build script now bypasses the broken SwiftPM manifest linker on this machine and detects duplicate SwiftBridging module maps. Its workaround is project-local; no system toolchain files were changed.
-
-## Repeatable commands
+## Run the checks
 
 ```sh
-(cd backend && npm run check && npm test)
+(cd backend && npm ci && npm run check && npm test)
 ./scripts/build-mac.sh
 ./scripts/check-mac-crypto.sh
 ./scripts/check-mac-clipboard.sh
@@ -29,30 +13,24 @@ The Mac build script now bypasses the broken SwiftPM manifest linker on this mac
 (cd android && ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:lintDebug)
 ```
 
-Android lint warnings include available dependency upgrades, the annotation processor, backup configuration, and synchronous preference writes on IO threads. The advisory recheck is pending: internal-registry authentication and automatic approval review prevented completing it. Do not interpret passing builds as a clean dependency audit.
+Backend integration tests require loopback networking for the local Cloudflare runtime. Mac checks require macOS; the clipboard check uses an isolated test pasteboard and needs access to pasteboard services. Storage checks use temporary synthetic data.
 
-Mac clipboard checks use a separate pasteboard to verify Finder image-file copying (the image rather than its file icon), direct PNG/TIFF data, and ignoring icons on non-image files. They require access to macOS pasteboard services.
+## Automated coverage
 
-Store checks verify cached payload replacement, pending-state updates, removal, expiry, and reopening encrypted storage. In one local run with eight synthetic 1 MiB payloads, a cold load took 31.91 ms and cached metadata reloads averaged 0.01 ms. This is a focused work-reduction check, not a battery measurement. Android's sync-request test verifies that a burst during a running sync produces one follow-up without dropping a later request.
+| Component | Coverage | Latest result |
+| --- | --- | --- |
+| Backend | Setup authorization, enrollment retries and concurrency, changed/revoked enrollment rejection, one-use invitations, uploads and retries, retrieval, cursors, deletion, expiration, device revocation, vault reset, and malformed/oversized requests. | Type-check and both tests pass. |
+| Mac | Shared encryption vectors, key wrapping, tamper rejection, clipboard image capture, pairing-code filtering, persisted enrollment state, encrypted storage, caching, retention, damaged-record isolation, repair, and explicit removal. | Build and crypto, clipboard, and store checks pass. |
+| Android | Shared encryption vectors, tamper rejection, sync-request coalescing, persisted enrollment state, missing/corrupt payload isolation and repair, and pairing-code filtering. | Five unit tests, debug assembly, and lint pass; 10 lint warnings remain. |
 
-Idle sync now uses Mac live notifications with a five-minute fallback, bounded reconnect delays on both apps, and Android periodic jobs only while paired and battery is not low. User-triggered sends still request immediate work. Device battery impact and cold-start memory use remain unmeasured.
+Earlier manual checks exercised native text/image capture and sync in both directions against a local backend, deletion propagation, Mac direct paste, Android restart persistence, and basic light/dark layouts. These are not automated regression coverage.
 
-The updated Mac app reached “Up to date” from `/Applications`. The updated Android app launched on the emulator in local-only mode with zero registered Zap background jobs. No physical phone was connected for this pass.
+## Verification limits
 
-## OSS enrollment checks, 13 September 2026
+- Enrollment tests verify persisted requests and retry behavior. Actual Keychain/Keystore write failures and native process termination during live enrollment have not been fault-injected.
+- Record tests cover individual payload damage. They do not establish recovery from a damaged database file or lost identity keys.
+- Native disconnect and 401 recovery have not been verified against a deployed Worker. Multi-megabyte uploads through the current streaming path still need validation against real R2 storage.
+- Large-history memory use, battery/OEM behavior, interrupted Android share imports, minimum-OS hardware, Intel Mac builds, login startup, screen-reader traversal, and tablet/foldable layouts remain unverified.
+- Release signing/notarization, installation updates preserving history and keys, and production failure recovery remain unverified. Dependency advisory review is incomplete.
 
-Backend integration checks cover retrying committed enrollment, concurrent identical pairing, changed requests, one-use invitations for other clients, revoked retries, and bootstrap after reset. Native checks round-trip the persisted pending request through serialization and verify that preparing connected state leaves the retry record intact until secure persistence succeeds. Backend type-check/tests, Mac store checks/build, and Android unit tests/debug assembly pass. Actual Keychain/Keystore write failures and native process termination during a live enrollment have not been fault-injected.
-
-## OSS record-recovery checks, 13 September 2026
-
-Mac store checks inject corrupt ciphertext and encrypted malformed payloads, reopen history, verify healthy items still load, retain expired damaged unsent rows, repair a row, preserve pending flags on disconnect, and explicitly discard damaged rows. Android file-store tests cover missing files, corrupt ciphertext, malformed payloads, restart, repair, and explicit removal. Tests use temporary synthetic stores. They do not establish recovery from a damaged database file or lost identity keys.
-
-## OSS pairing-code checks, 13 September 2026
-
-Native text-capture checks reject pairing URLs at the start of text, after whitespace, and within mixed-case surrounding text while accepting ordinary clipboard text. Android share and clipboard ingestion both call the tested text-payload constructor before saving. Copied pairing codes use Android’s sensitive-content preview hint; this is not an access-control mechanism. Final verification passes: backend type-check and integration tests; Mac build, crypto, store, and isolated clipboard checks; Android’s five unit tests, debug assembly, and lint (existing warnings remain).
-
-## Not established
-
-`DELETE /v1/devices/me` has only been exercised by the local integration test. Neither native client's disconnect path, nor the 401 re-pairing path, has been run against a deployed Worker, and no backend changes were deployed. Uploads now stream into R2 through a fixed-length stream; a real multi-megabyte upload against R2 has not been re-run.
-
-Large-history performance, interrupted share imports, whole-database corruption and identity-key loss recovery, physical-phone battery/OEM behavior, Android 10 hardware, Intel Mac builds, actual login startup, release signing/notarization, OS screen-reader traversal, tablets/foldables, and production failure recovery remain unverified. See [production-readiness.md](production-readiness.md) for prioritized findings.
+See [production readiness](production-readiness.md) for release priorities and security assumptions.

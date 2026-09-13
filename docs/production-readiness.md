@@ -1,70 +1,28 @@
-# Production readiness review
+# Production readiness
 
-Reviewed 11 September 2026. **Suitable for continued personal testing; not ready for broad distribution.** This review included source, local backend regression tests, native builds, Android lint, and a bounded native visual pass. It is not a security certification or a load test.
+Updated 13 September 2026. **Suitable for personal testing; not ready for broad distribution.** Build and test results are documented in [verification.md](verification.md). This is not a security certification or a load test.
 
-## Fixes completed
+## Security assumptions
 
-- Serialized uploads for the same item ID and coordinated uploads with R2 cleanup, preventing concurrent retries from replacing committed ciphertext. Added a concurrent-upload regression check.
-- Bounded JSON and upload request reads before allocating the complete body; reject non-object JSON. Added malformed/oversized request checks.
-- Prevented Android pairing requests from carrying existing device credentials to a different server. Both clients require disconnecting before joining another history.
-- Replaced Mac force-unwraps of remote keys and invitations with recoverable errors. Preserved retention edits made during a sync, and fixed recapturing a previously deleted item.
-- Removed unused Android DAO/crypto methods and an unused Mac dismissal callback. Serialized Android startup reads with repository writes and preserved coroutine cancellation during sync.
-- Updated Wrangler, Miniflare, worker types, and the test bundler; pinned `sharp` to 0.35.4 for the identified transitive advisories. No internal registry URLs remain in the lockfile.
-- Added the published Gradle distribution checksum. Disabled Wrangler's automatic config mutation when creating the already-declared R2 bucket.
-- Added Mac and adaptive/themed Android app icons, a branded Android header, native settings action rows, persistent Android sync feedback, compact Mac dates, a compact pairing sheet, and accurate local-only clear confirmations. Android image byte preparation now runs off the UI thread.
-- Changed the default Mac shortcut to Option+Space and verified panel opening/closing.
-
-### Follow-up review, 11 September 2026
-
-- Disconnecting now revokes the device's own credential with `DELETE /v1/devices/me` and invalidates outstanding invitations, instead of discarding a credential that stayed valid forever and left the device listed on its peers. The last device to leave clears history and returns the deployment to its uninitialized state. A sync that receives 401 now stops retrying and returns the app to local-only history with a re-pairing message rather than reporting "Offline · will retry" indefinitely.
-- Clearing history sends the bulk clear alone. It previously also queued a per-item deletion for every clip, so clearing N items cost N+1 requests, revision bumps, and change broadcasts to every paired device.
-- Mac capture snapshots the pasteboard on the main actor and decodes, PNG-encodes, and base64s off it. Only the encrypted local write remains on the main actor.
-- Uploads stream into R2 through a fixed-length stream instead of buffering the whole body in the Durable Object.
-- The Android pairing confirmation names the server it would join, because any app or web page can send a `zap://pair` link to a phone that is not yet paired.
-- Renamed the Mac pairing entry point from Pair Android to Pair another device and rewrote the pairing sheet, Mac join hint, Android hint, and README for a second Mac. Adding one already worked; only the copy assumed a phone. The setup and join buttons no longer share one in-flight flag, and captures skip text beginning with `zap://pair#` so moving a code between devices does not file the group keys in the receiving device's history.
-- Smaller: rotation tolerates a key row a device already holds; coalesced Mac syncs keep the force flag they were asked for; Mac SQLite reads tolerate NULL columns; Android identity access is serialized on one monitor and reports a missing encryption key instead of a raw JSON error; the P-256 curve is read once rather than by generating a throwaway key pair per envelope; an abandoned deployment stops re-arming its alarm.
-
-### OSS follow-up, 13 September 2026
-
-- Enrollment now persists a client-generated credential and the complete request before sending. Identical retries recover committed enrollment; changed or revoked requests are rejected. Both native clients retain pending requests through transport and final local-save failures and resume after restart. The backend must be upgraded before enrolling with these clients.
-
-- History loading now isolates unreadable local records and continues with healthy content. Sync retries missing/corrupt synced content without stopping other downloads, preserves unsent damaged records past retention, and exposes recovery/discard controls. Disconnect preserves pending metadata for those records.
-
-- Android and Mac reject captured text containing pairing-code URLs, including surrounding text or whitespace. Android masks manual entry and marks copied codes sensitive for system previews. Pairing UI and documentation distinguish invitation expiry from the lasting sensitivity of embedded keys. Existing saved codes need explicit deletion.
+- The self-hosted server is trusted for device membership. Clients wrap rotation keys for public keys from its unsigned device roster; a malicious server could substitute a key and obtain a future group key. Membership authentication is required before claiming protection against that attack.
+- Pairing codes contain encryption keys that remain sensitive after the enrollment invitation expires. Capture filters prevent new text captures containing pairing codes; previously saved codes require explicit deletion. Android's sensitive-clipboard hint hides supported previews but does not restrict clipboard access.
+- Removing a device revokes access and rotates keys for future captures. It cannot erase already-downloaded content. Losing every paired device means starting with a fresh deployment/history.
+- Retention does not guarantee forensic erasure from backups. Damaged local records are retained for recovery until repaired or explicitly discarded. There is no general password filtering.
 
 ## Open findings
 
-| Priority | Finding and evidence | Required follow-up |
+P1 findings should be resolved before broad release. P2 findings concern distribution and operation.
+
+| Priority | Finding | Follow-up |
 | --- | --- | --- |
-| P1 | **History memory and cold-start work are unbounded.** Both clients now reuse decrypted payloads across refreshes, but the first load still decrypts every retained payload and large base64 images stay resident. Mac capture no longer encodes on the main actor, but `Store.all()` still decrypts there; Android also holds its repository mutex during blocking network calls. | Load lightweight list records separately from payloads, decrypt images on demand with a bounded cache, and keep networking outside local mutation locks. Measure startup, capture latency, and peak memory with image-heavy history. |
-| P1 | **Android share ingestion depends on the Activity lifecycle.** `MainActivity.receive()` launches in `lifecycleScope`; leaving during a large share can cancel the operation before it is durable. | Copy incoming content into private staging while the grant is valid, hand ownership to durable work, and show saving/completion state. Test Back, rotation, and process death during multi-image import. |
-| P1 | **The encryption trust boundary needs to be explicit.** Key rotation wraps the new key for public keys supplied by the server's unsigned device roster. A malicious server could substitute a public key and receive a future rotation key. | Treat the self-hosted server as trusted for device membership. Authenticate membership changes before claiming protection against an actively malicious server. Encryption currently protects stored payloads and ordinary transit, not this attack. |
-| P2 | **Operations and abuse controls are incomplete.** `/health` is a liveness response. There are no application quotas, failed-enrollment rate limits, cleanup-lag metrics, or alerting. Sync returns a full metadata snapshot without pagination. | Add practical per-vault limits, monitor cleanup failures and retry rates without logging clipboard data, and exercise R2 failure/recovery. Add pagination before supporting very large histories. |
-| P2 | **Distribution has no release gate.** Current artifacts use Android debug signing and Mac ad-hoc signing. There is no CI workflow or release signing/notarization pipeline. | Configure persistent release signing, and automate the existing lean checks. Exercise clean installation and an update preserving history/keys. |
+| P1 | Initial history loading decrypts all retained payloads, and large images remain in memory. Mac decrypts on the main actor; Android holds its repository mutex during blocking network calls. | Load lightweight metadata separately, decrypt images on demand with a bounded cache, move networking outside local mutation locks, and measure large-history startup and memory use. |
+| P1 | Android share ingestion runs in the Activity lifecycle and can be cancelled before content is durable. | Stage incoming content while its access grant is valid, transfer ownership to durable work, and test Back, rotation, and process death during import. |
+| P1 | Key rotation trusts the server's unsigned device roster. | Authenticate membership changes before supporting an actively malicious server threat model. |
+| P2 | There are no application quotas, failed-enrollment rate limits, cleanup-lag metrics, or alerting. Sync returns an unpaginated metadata snapshot; `/health` checks liveness only. | Add practical limits and monitoring without logging clipboard content, exercise R2 failure/recovery, and paginate large histories. |
+| P2 | Packages use Android debug signing and default Mac ad-hoc signing. There is no CI or release signing/notarization pipeline. | Automate existing checks, configure persistent release signing, and verify installation and updates preserve history and keys. |
 
-P1 means fix before broad release; P2 means resolve as part of operating/distributing the app. No P0 issue was established by the checks performed.
+## Dependency and deployment checks
 
-## Dependency audit boundary
+A clean dependency advisory audit has not been established for the current npm lockfile, and Android dependencies have not been comprehensively audited. The deployed Worker has no runtime npm dependencies; development-tool dependencies still need review.
 
-The initial npm audit reported four high-severity affected packages in development tooling: Wrangler, Miniflare, sharp, and ws. These tools are not bundled into the deployed Worker. The identified paths were updated; the Worker still has no runtime npm dependencies.
-
-Package downloads succeeded through the supplied internal registry. Its audit endpoint required authentication. Automatic approval review blocked the public-registry recheck because it would disclose this private project's dependency metadata. **A clean final advisory audit has not been established.** Android dependency advisories were not comprehensively audited.
-
-## Native finish assessment
-
-The apps use SwiftUI/AppKit and Jetpack Compose Material 3 controls. Android settings actions are full-width `ListItem` rows with icons and descriptions, rather than a stack of low-emphasis text buttons. The paired-paper brand mark uses ink, warm white, and lime; normal controls keep their native platform palette.
-
-| Dimension | Score | Basis |
-| --- | --- | --- |
-| Accessibility | 2/4 | Labels and native controls are present; larger Android text was inspected. TalkBack and VoiceOver traversal were not exercised. |
-| Performance | 1/4 | Image preparation was improved, but whole-history loading remains the major issue above. |
-| Appearance | 3/4 | Native light/dark screens and launcher artwork were reviewed; controls and supporting text retain readable hierarchy. |
-| Platform conformance | 3/4 | Native search, lists, sheets/dialogs, Back, clipboard import, and share entry points. Some lifecycle recovery remains open. |
-| Adaptivity | 2/4 | Mac panel and phone layouts were checked; landscape, tablet, split-screen, and foldable coverage remain incomplete. |
-| Total | 11/20 | The visual finish is ahead of the reliability and coverage work. |
-
-This was a source audit and an inline visual review, not an independent accessibility or performance audit. Keep the compact history layout and standard platform controls while addressing the remaining work.
-
-## Verification boundaries
-
-See [verification.md](verification.md) for commands and results. No backend changes were deployed by this review. A Pixel installation and emulator captures do not establish battery/OEM reliability, minimum-OS support, or production recovery. Test those explicitly before release.
+Deploy the updated backend before enrolling with the current clients. Enrollment now requires client-generated credentials and supports recovery of interrupted registration. Local tests do not replace verification of native enrollment, revocation, streaming uploads, and recovery against a deployed Worker.
