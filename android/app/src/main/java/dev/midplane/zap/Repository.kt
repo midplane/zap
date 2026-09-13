@@ -105,9 +105,7 @@ class Repository(private val context: Context) {
         syncRequests.request()
     }
     suspend fun addText(text: String) = withContext(Dispatchers.IO) {
-        require(text.isNotEmpty()) { "Clipboard is empty" }
-        require(text.toByteArray().size <= 1024 * 1024) { "Text is too large. Maximum: 1 MiB." }
-        add(JSONObject().put("kind", "text").put("text", text))
+        add(TextCapture.payload(text))
     }
     suspend fun addImage(uri: Uri) = withContext(Dispatchers.IO) {
         val data = context.contentResolver.openInputStream(uri)?.use { input ->

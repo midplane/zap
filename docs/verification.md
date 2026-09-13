@@ -47,6 +47,10 @@ Backend integration checks cover retrying committed enrollment, concurrent ident
 
 Mac store checks inject corrupt ciphertext and encrypted malformed payloads, reopen history, verify healthy items still load, retain expired damaged unsent rows, repair a row, preserve pending flags on disconnect, and explicitly discard damaged rows. Android file-store tests cover missing files, corrupt ciphertext, malformed payloads, restart, repair, and explicit removal. Tests use temporary synthetic stores. They do not establish recovery from a damaged database file or lost identity keys.
 
+## OSS pairing-code checks, 13 September 2026
+
+Native text-capture checks reject pairing URLs at the start of text, after whitespace, and within mixed-case surrounding text while accepting ordinary clipboard text. Android share and clipboard ingestion both call the tested text-payload constructor before saving. Copied pairing codes use Android’s sensitive-content preview hint; this is not an access-control mechanism. Final verification passes: backend type-check and integration tests; Mac build, crypto, store, and isolated clipboard checks; Android’s five unit tests, debug assembly, and lint (existing warnings remain).
+
 ## Not established
 
 `DELETE /v1/devices/me` has only been exercised by the local integration test. Neither native client's disconnect path, nor the 401 re-pairing path, has been run against a deployed Worker, and no backend changes were deployed. Uploads now stream into R2 through a fixed-length stream; a real multi-megabyte upload against R2 has not been re-run.

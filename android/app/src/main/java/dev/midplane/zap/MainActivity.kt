@@ -5,6 +5,7 @@ import android.content.ClipboardManager
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.os.PersistableBundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -196,7 +197,7 @@ class MainActivity : ComponentActivity() {
     }
     if (manualPair) {
         var code by remember { mutableStateOf("") }
-        AlertDialog(onDismissRequest = { manualPair = false }, title = { Text("Pair with Mac") }, text = { OutlinedTextField(code, { code = it }, label = { Text("Pairing code") }, maxLines = 5) }, confirmButton = { TextButton(onClick = { pairing = code.trim(); manualPair = false }, enabled = code.isNotBlank()) { Text("Continue") } }, dismissButton = { TextButton(onClick = { manualPair = false }) { Text("Cancel") } })
+        AlertDialog(onDismissRequest = { manualPair = false }, title = { Text("Pair with Mac") }, text = { OutlinedTextField(code, { code = it }, label = { Text("Pairing code") }, maxLines = 5, visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(), keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Password)) }, confirmButton = { TextButton(onClick = { pairing = code.trim(); manualPair = false }, enabled = code.isNotBlank()) { Text("Continue") } }, dismissButton = { TextButton(onClick = { manualPair = false }) { Text("Cancel") } })
     }
     pairing?.let { code ->
         val host = remember(code) { pairingHost(code) }
@@ -273,7 +274,7 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
-    invitation?.let { code -> AlertDialog(onDismissRequest = { invitation = null }, title = { Text("Pair another device") }, text = { Text("Copy this private code and enter it in Zap on the new device. It expires in five minutes.") }, confirmButton = { TextButton(onClick = { context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Pairing code", code)); invitation = null }) { Text("Copy code") } }, dismissButton = { TextButton(onClick = { invitation = null }) { Text("Cancel") } }) }
+    invitation?.let { code -> AlertDialog(onDismissRequest = { invitation = null }, title = { Text("Pair another device") }, text = { Text("Copy this private code into Zap on the new device. The invitation lets one device join within five minutes. The code also contains encryption keys that remain sensitive after expiry.") }, confirmButton = { TextButton(onClick = { copyPairingCode(context, code); invitation = null }) { Text("Copy code") } }, dismissButton = { TextButton(onClick = { invitation = null }) { Text("Cancel") } }) }
     if (disconnecting) AlertDialog(onDismissRequest = { disconnecting = false }, title = { Text("Disconnect?") }, text = { Text("Local history stays on this phone and will upload when you connect again.") }, confirmButton = { TextButton(onClick = { disconnecting = false; onAction { repo.disconnect() } }) { Text("Disconnect") } }, dismissButton = { TextButton(onClick = { disconnecting = false }) { Text("Cancel") } })
     if (clearing) AlertDialog(onDismissRequest = { clearing = false }, title = { Text("Clear history?") }, text = { Text(if (connected) "History will be deleted on all connected devices when they sync." else "History will be deleted from this phone.") }, confirmButton = { TextButton(onClick = { clearing = false; onAction { repo.clear() } }) { Text("Clear history") } }, dismissButton = { TextButton(onClick = { clearing = false }) { Text("Cancel") } })
     if (discarding) AlertDialog(onDismissRequest = { discarding = false }, title = { Text("Discard damaged items?") }, text = { Text(if (connected) "Unreadable items will be deleted here and on paired devices when you sync. Healthy items stay." else "Unreadable items will be permanently deleted from this phone. Healthy items stay.") }, confirmButton = { TextButton(onClick = { discarding = false; onAction { repo.discardDamaged() } }) { Text("Discard") } }, dismissButton = { TextButton(onClick = { discarding = false }) { Text("Cancel") } })
@@ -300,6 +301,12 @@ class MainActivity : ComponentActivity() {
 private fun pairingHost(code: String): String? = runCatching {
     Uri.parse(JSONObject(String(java.util.Base64.getUrlDecoder().decode(code.substringAfter('#')))).getString("url")).host
 }.getOrNull()
+private fun copyPairingCode(context: android.content.Context, code: String) {
+    val clip = ClipData.newPlainText("Pairing code", code)
+    // Use the documented key string so this preview hint also works with our Android 10 minimum.
+    clip.description.extras = PersistableBundle().apply { putBoolean("android.content.extra.IS_SENSITIVE", true) }
+    context.getSystemService(ClipboardManager::class.java).setPrimaryClip(clip)
+}
 private fun relativeDate(time: Long): String {
     val minutes = (System.currentTimeMillis() - time).coerceAtLeast(0) / 60_000
     return when { minutes < 1 -> "Just now"; minutes < 60 -> "${minutes}m ago"; minutes < 1440 -> "${minutes / 60}h ago"; else -> DateFormat.getDateInstance(DateFormat.SHORT).format(Date(time)) }

@@ -30,6 +30,8 @@ Reviewed 11 September 2026. **Suitable for continued personal testing; not ready
 
 - History loading now isolates unreadable local records and continues with healthy content. Sync retries missing/corrupt synced content without stopping other downloads, preserves unsent damaged records past retention, and exposes recovery/discard controls. Disconnect preserves pending metadata for those records.
 
+- Android and Mac reject captured text containing pairing-code URLs, including surrounding text or whitespace. Android masks manual entry and marks copied codes sensitive for system previews. Pairing UI and documentation distinguish invitation expiry from the lasting sensitivity of embedded keys. Existing saved codes need explicit deletion.
+
 ## Open findings
 
 | Priority | Finding and evidence | Required follow-up |

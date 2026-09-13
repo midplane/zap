@@ -93,7 +93,7 @@ struct PairCode: Codable { var url: String; var token: String; var keyId: String
         }
         guard let text = content.text, !text.isEmpty else { return nil }
         // A pairing code carries the group keys. Moving one between devices should not file it in history.
-        guard !text.hasPrefix("zap://pair#") else { return nil }
+        guard !ClipboardContent.containsPairingCode(text) else { return nil }
         guard text.utf8.count <= 1024 * 1024 else { throw ZapError("Text is too large. Maximum: 1 MiB.") }
         return Payload(kind: "text", text: text, source: source, createdAt: createdAt)
     }

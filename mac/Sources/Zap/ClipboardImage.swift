@@ -6,6 +6,7 @@ struct ClipboardContent: Sendable {
     var file: URL?
     var imageData: Data?
     var text: String?
+    static func containsPairingCode(_ text: String) -> Bool { text.range(of: "zap://pair#", options: .caseInsensitive) != nil }
 
     static func read(from board: NSPasteboard) -> ClipboardContent {
         let file = (board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL])?.first

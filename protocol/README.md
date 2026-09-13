@@ -8,7 +8,7 @@ Devices have P-256 agreement keys. Public keys are base64 uncompressed X9.63 poi
 
 - `POST /v1/bootstrap`: `{enrollmentId, deviceToken, name, publicKey, keyId, envelope}` → `{deviceId, token, keyId}`.
 - `POST /v1/invitations`: → `{token}` valid for five minutes.
-- QR: `zap://pair#<base64url JSON>` containing `{url, token, keyId, keys: {keyId: base64Key}}`. The fragment keeps keys out of HTTP requests. Treat the entire QR as a secret.
+- QR: `zap://pair#<base64url JSON>` containing `{url, token, keyId, keys: {keyId: base64Key}}`. The fragment keeps keys out of HTTP requests. Only the enrollment token expires. Embedded group keys remain usable for matching ciphertext after expiry; treat the entire QR as a lasting secret.
 - `POST /v1/pair`: `{enrollmentId, deviceToken, token, name, publicKey, keyId, envelope, historyEnvelopes}` → device credentials. Envelopes wrap the QR's keys for the joining device. Never send raw keys.
 - `GET /v1/sync?cursor=N`: `{cursor, days, keyId, keys:[{keyId,envelope}], devices:[{id,name,publicKey}], items:[{id,deviceId,keyId,createdAt,size}]|null}`. An unchanged revision returns null items; a changed revision returns an authoritative metadata snapshot. Clients retain unsent captures, remove absent previously synced captures, and download only missing payloads. Do not advance the cursor until the snapshot is applied successfully.
 - `PUT /v1/items/:id`: binary encrypted content; `X-Key-Id`, `X-Created-At`, and `Content-Length` headers. Idempotent by ID. Expired/deleted IDs return 410; rotation requires refreshing keys and re-encrypting after 409.

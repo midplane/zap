@@ -2,6 +2,10 @@ import AppKit
 
 @main struct ClipboardCheck {
     @MainActor static func main() throws {
+        for text in ["zap://pair#secret", "  \nzap://pair#secret", "Invitation: ZAP://PAIR#secret\nKeep private"] {
+            precondition(ClipboardContent.containsPairingCode(text), "Pairing code would enter history")
+        }
+        precondition(!ClipboardContent.containsPairingCode("Ordinary clipboard text"))
         let board = NSPasteboard.withUniqueName()
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

@@ -59,7 +59,7 @@ The script provisions `zap-content` in R2, deploys the Worker/Durable Object, an
 
 1. Open Mac Settings, enter the deployed HTTPS Worker URL and setup token, and connect.
 2. Choose **Pair another device**. On Android, open Settings → **Scan pairing code**.
-3. Confirm the connection on the phone. QR invitations expire after five minutes and can be used once. The code contains encryption keys; keep it private. Manual code entry is available if scanning is inconvenient.
+3. Confirm the connection on the phone. QR invitations expire after five minutes and can be used once. Only enrollment permission expires: the embedded encryption keys can still decrypt matching ciphertext afterward. Keep the entire code private, even after expiry. Manual code entry is available if scanning is inconvenient.
 
 Any connected device can create a code with **Pair another device**. To add a second or replacement Mac, copy the code from the pairing sheet, then paste it into **Join existing history** in Settings on the new Mac — the same code works for a Mac or a phone. **Disconnect** forgets the server connection while retaining local history; that history uploads when you connect to another server.
 
@@ -97,6 +97,6 @@ Device removal revokes access and rotates encryption for future captures. It can
 
 Unreadable records are isolated so healthy history remains usable. Settings shows recovery status, retries, and an explicit **Discard damaged items** action. Synced records are downloaded again automatically. Unsent damaged records remain encrypted in local storage, including past their retention date, until repaired or explicitly discarded. Discarding while connected also queues deletion on paired devices; **Clear history** includes damaged records.
 
-Retention removes items from active history and schedules blob cleanup. It does not guarantee forensic erasure from OS or Cloudflare backups. There is no special filtering of passwords or other sensitive clipboard content.
+Retention removes items from active history and schedules blob cleanup. It does not guarantee forensic erasure from OS or Cloudflare backups. Both apps reject captured text containing Zap pairing codes. Android masks manual pairing input and marks copied pairing codes as sensitive so supported system clipboard previews hide them. This does not prevent another app with clipboard access from reading a copied code. Previously saved codes are not removed automatically; delete any such entries from history. There is no general filtering of passwords or other sensitive clipboard content.
 
 Plain text and static images only: 1 MiB text, 20 MiB PNG, 40 megapixels. No rich text, files, pins, OCR, analytics, or compatibility layers. Apps and backend ship together.

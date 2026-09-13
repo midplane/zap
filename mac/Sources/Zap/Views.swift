@@ -212,7 +212,7 @@ private struct PairingView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Open Zap on the new device").font(.headline)
                     Text("On Android, open Settings and scan this code. On a Mac, copy the code and paste it into Join existing history.").foregroundStyle(Color.zapSecondary)
-                    Text("Treat the code like a password. It expires in five minutes and works once.").font(.caption).foregroundStyle(Color.zapSecondary)
+                    Text("The invitation lets one device join within five minutes. The code also contains encryption keys that remain sensitive after expiry. Keep it private.").font(.caption).foregroundStyle(Color.zapSecondary)
                     Button("Copy pairing code") {
                         let board = NSPasteboard.general; board.clearContents(); board.setString(code, forType: .string)
                         model.ignoreCurrentClipboard()
