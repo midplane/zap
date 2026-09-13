@@ -4,6 +4,11 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jetbrains.kotlin.kapt")
 }
+val prepareLicenseAssets by tasks.registering(Sync::class) {
+    from(rootProject.file("../LICENSE"))
+    from(rootProject.file("../licenses/android"))
+    into(layout.buildDirectory.dir("generated/licenseAssets/licenses"))
+}
 android {
     namespace = "dev.midplane.zap"
     compileSdk = 35
@@ -11,7 +16,9 @@ android {
     buildFeatures { compose = true; buildConfig = true }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }
+    sourceSets.getByName("main").assets.srcDir(layout.buildDirectory.dir("generated/licenseAssets"))
 }
+tasks.named("preBuild") { dependsOn(prepareLicenseAssets) }
 dependencies {
     implementation(platform("androidx.compose:compose-bom:2024.12.01"))
     implementation("androidx.activity:activity-compose:1.9.3")

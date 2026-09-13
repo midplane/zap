@@ -1,0 +1,37 @@
+import groovy.json.JsonOutput
+import org.gradle.api.artifacts.component.ModuleComponentIdentifier
+import org.gradle.api.artifacts.result.UnresolvedDependencyResult
+
+// Read-only inventory of app, test, annotation-processor, and plugin dependencies.
+allprojects { project ->
+    afterEvaluate {
+        tasks.register('ossDependencyInventory') {
+            doLast {
+                def scopes = [:].withDefault { [] }
+                def names = ['releaseRuntimeClasspath', 'debugRuntimeClasspath',
+                             'debugUnitTestRuntimeClasspath', 'kapt', 'kaptDebug', 'kaptRelease']
+                def configs = project.configurations.findAll { it.canBeResolved && it.name in names }
+                configs += project.buildscript.configurations.findAll { it.canBeResolved && it.name == 'classpath' }
+                configs.each { config ->
+                    def result = config.incoming.resolutionResult
+                    def failures = result.allDependencies.findAll { it instanceof UnresolvedDependencyResult }
+                    if (!failures.empty) {
+                        throw new GradleException("Incomplete dependency inventory: ${failures*.attempted}")
+                    }
+                    // Populate runtime JAR/AARs for the accompanying notice review.
+                    config.incoming.artifacts.artifactFiles.files
+                    result.allComponents.each { component ->
+                        if (component.id instanceof ModuleComponentIdentifier) {
+                            def id = component.id
+                            scopes["${id.group}:${id.module}:${id.version}".toString()] << config.name
+                        }
+                    }
+                }
+                def output = new File(project.rootProject.projectDir, "../dist/audit/android-${project.name}.json")
+                output.parentFile.mkdirs()
+                output.text = JsonOutput.prettyPrint(JsonOutput.toJson(scopes.sort())) + '\n'
+                println "Wrote ${scopes.size()} coordinates to ${output}"
+            }
+        }
+    }
+}

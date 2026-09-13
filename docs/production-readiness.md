@@ -19,10 +19,14 @@ P1 findings should be resolved before broad release. P2 findings concern distrib
 | P1 | Android share ingestion runs in the Activity lifecycle and can be cancelled before content is durable. | Stage incoming content while its access grant is valid, transfer ownership to durable work, and test Back, rotation, and process death during import. |
 | P1 | Key rotation trusts the server's unsigned device roster. | Authenticate membership changes before supporting an actively malicious server threat model. |
 | P2 | There are no application quotas, failed-enrollment rate limits, cleanup-lag metrics, or alerting. Sync returns an unpaginated metadata snapshot; `/health` checks liveness only. | Add practical limits and monitoring without logging clipboard content, exercise R2 failure/recovery, and paginate large histories. |
-| P2 | Packages use Android debug signing and default Mac ad-hoc signing. There is no CI or release signing/notarization pipeline. | Automate existing checks, configure persistent release signing, and verify installation and updates preserve history and keys. |
+| P2 | Packages use Android debug signing and default Mac ad-hoc signing. CI is configured, with its first hosted run pending; there is no release signing/notarization pipeline. | Confirm hosted checks pass, configure persistent release signing, and verify installation and updates preserve history and keys. |
+| P2 | The Android build toolchain has 14 dependency coordinates with advisory matches, including Kotlin build-cache deserialization. | Upgrade AGP/Kotlin/Gradle together, rescan the full graph, and verify builds and device behavior before release signing. See the dependency audit for scope and mitigations. |
 
 ## Dependency and deployment checks
 
-A clean dependency advisory audit has not been established for the current npm lockfile, and Android dependencies have not been comprehensively audited. The deployed Worker has no runtime npm dependencies; development-tool dependencies still need review.
+The [dependency audit](dependency-audit.md) reports zero npm findings after an
+Undici patch, no OSV matches across the 114 Android runtime coordinates, and open
+matches in 14 Android build-tool coordinates. The deployed Worker has no runtime
+npm dependencies. These scans do not establish that unmatched code is safe.
 
 Deploy the updated backend before enrolling with the current clients. Enrollment now requires client-generated credentials and supports recovery of interrupted registration. Local tests do not replace verification of native enrollment, revocation, streaming uploads, and recovery against a deployed Worker.

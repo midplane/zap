@@ -29,6 +29,7 @@ jobs:
           node-version: '22'
           package-manager-cache: false
       - run: npm ci
+      - run: npm audit
       - run: npm run check
       - run: npm test
       - run: npx wrangler deploy --dry-run
@@ -50,6 +51,13 @@ jobs:
       - name: Test, build, and lint
         working-directory: android
         run: ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebug :app:lintDebug
+      - name: Inventory Android dependencies
+        working-directory: android
+        run: ./gradlew --no-daemon --init-script ../scripts/android-dependencies.init.gradle ossDependencyInventory
+      - name: Audit Android runtime dependencies
+        run: python3 scripts/audit-android.py --runtime-only
+      - name: Check third-party notices
+        run: python3 scripts/android-notices.py --check
 
   mac:
     runs-on: macos-15
