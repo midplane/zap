@@ -4,6 +4,8 @@ Private clipboard history for Mac and Android. Native apps, ten days of history 
 
 Currently intended for personal testing. Read the [production readiness review](docs/production-readiness.md) before distributing or relying on it for important history.
 
+Licensed under the [MIT License](LICENSE), copyright 2026 Nikhil Bafna. This covers Zap's original code, documentation, and artwork. Third-party components, including the Gradle wrapper and application dependencies, retain their own licenses and notices.
+
 ## Daily use
 
 On Mac, copy text or an image as usual. Open Zap with **⌥Space (Option+Space)**, search, and press **Enter** to paste. Arrows select; Space previews when search is empty; ⌘C copies. Use the menu-bar icon for settings and startup options. Direct paste needs macOS Accessibility permission.

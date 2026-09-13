@@ -1,5 +1,6 @@
 {
   "name": "zap-backend",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "scripts": {
