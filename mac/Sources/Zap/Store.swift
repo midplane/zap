@@ -7,17 +7,23 @@ struct Payload: Codable {
     var text: String?
     var png: String?
     var source: String
+    /// Milliseconds since 1970.
     var createdAt: Int64
+
     func validate() throws {
-        guard (kind == "text" && text != nil) || (kind == "image" && png.flatMap({ Data(base64Encoded: $0) }) != nil) else { throw ZapError("Content is damaged.") }
+        let isText = kind == "text" && text != nil
+        let isImage = kind == "image" && png.flatMap({ Data(base64Encoded: $0) }) != nil
+        guard isText || isImage else { throw ZapError("Content is damaged.") }
     }
 }
+
 struct Clip: Identifiable {
     var id: String
     var payload: Payload
     var pending: Bool
     var date: Date { Date(timeIntervalSince1970: Double(payload.createdAt) / 1000) }
 }
+
 struct Identity: Codable {
     var privateKey: Data
     var localKey: Data
@@ -27,93 +33,152 @@ struct Identity: Codable {
     var token: String = ""
     var deviceId: String = ""
     var enrollment: PendingEnrollment?
+
     static func make() -> Identity {
         let id = UUID().uuidString
         return Identity(privateKey: P256.KeyAgreement.PrivateKey().rawRepresentation, localKey: VaultCrypto.randomKey(), keys: [id: VaultCrypto.randomKey()], keyId: id)
     }
-    var publicKey: String { get throws { try P256.KeyAgreement.PrivateKey(rawRepresentation: privateKey).publicKey.x963Representation.base64EncodedString() } }
+
+    var publicKey: String {
+        get throws {
+            try P256.KeyAgreement.PrivateKey(rawRepresentation: privateKey).publicKey.x963Representation.base64EncodedString()
+        }
+    }
 }
+
+private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+
 final class Store {
     private var db: OpaquePointer?
     private let localKey: Data
     private var cached: [String: Payload] = [:]
     private(set) var damagedIDs = Set<String>()
+
     init(key: Data, directory: URL? = nil) throws {
         localKey = key
-        let directory = try directory ?? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true).appendingPathComponent("dev.midplane.zap")
+        let directory = try directory ?? FileManager.default
+            .url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+            .appendingPathComponent("dev.midplane.zap")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        guard sqlite3_open(directory.appendingPathComponent("history.sqlite").path, &db) == SQLITE_OK else { throw ZapError("Could not open local history.") }
+        guard sqlite3_open(directory.appendingPathComponent("history.sqlite").path, &db) == SQLITE_OK else {
+            throw ZapError("Could not open local history.")
+        }
         try execute("PRAGMA journal_mode=WAL")
         try execute("CREATE TABLE IF NOT EXISTS clips(id TEXT PRIMARY KEY, created INTEGER, payload TEXT, pending INTEGER)")
         try execute("CREATE TABLE IF NOT EXISTS deletions(id TEXT PRIMARY KEY)")
     }
+
     deinit { sqlite3_close(db) }
-    private func execute(_ sql: String, _ args: [String] = []) throws {
-        let statement = try prepare(sql, args); defer { sqlite3_finalize(statement) }
-        var result = sqlite3_step(statement)
-        while result == SQLITE_ROW { result = sqlite3_step(statement) }
-        guard result == SQLITE_DONE else { throw ZapError("Could not save local history.") }
+
+    func records() throws -> [(id: String, pending: Bool)] {
+        try rows("SELECT id,pending FROM clips").map { ($0[0], $0[1] == "1") }
     }
-    private func prepare(_ sql: String, _ args: [String]) throws -> OpaquePointer {
-        var statement: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK, let statement else { throw ZapError("Could not read local history.") }
-        for (i, value) in args.enumerated() { sqlite3_bind_text(statement, Int32(i + 1), value, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self)) }
-        return statement
-    }
-    private func rows(_ sql: String, _ args: [String] = []) throws -> [[String]] {
-        let statement = try prepare(sql, args); defer { sqlite3_finalize(statement) }
-        var result: [[String]] = []
-        var status = sqlite3_step(statement)
-        while status == SQLITE_ROW {
-            result.append((0..<sqlite3_column_count(statement)).map { index in
-                guard let text = sqlite3_column_text(statement, index) else { return "" }
-                return String(cString: text)
-            })
-            status = sqlite3_step(statement)
-        }
-        guard status == SQLITE_DONE else { throw ZapError("Could not read local history.") }
-        return result
-    }
-    func records() throws -> [(id: String, pending: Bool)] { try rows("SELECT id,pending FROM clips").map { ($0[0], $0[1] == "1") } }
+
     func all() throws -> [Clip] {
         let records = try rows("SELECT id,pending FROM clips ORDER BY created DESC")
-        let ids = Set(records.map { $0[0] }); cached = cached.filter { ids.contains($0.key) }
+        let ids = Set(records.map { $0[0] })
+        cached = cached.filter { ids.contains($0.key) }
         damagedIDs = []
         return records.compactMap { row in
             let id = row[0]
             do {
-                if cached[id] == nil {
-                    guard let value = try rows("SELECT payload FROM clips WHERE id=?", [id]).first?.first, let encrypted = Data(base64Encoded: value) else { throw ZapError("Local history is damaged.") }
-                    let payload = try JSONDecoder().decode(Payload.self, from: VaultCrypto.open(encrypted, key: localKey, aad: id))
-                    try payload.validate(); cached[id] = payload
-                }
-                guard let payload = cached[id] else { throw ZapError("Could not load local history.") }
-                return Clip(id: id, payload: payload, pending: row[1] == "1")
+                return Clip(id: id, payload: try payload(id), pending: row[1] == "1")
             } catch {
                 // Quarantine in place: preserve the original encrypted row for repair or explicit removal.
-                damagedIDs.insert(id); return nil
+                damagedIDs.insert(id)
+                return nil
             }
         }
     }
+
+    private func payload(_ id: String) throws -> Payload {
+        if let payload = cached[id] { return payload }
+        guard let value = try rows("SELECT payload FROM clips WHERE id=?", [id]).first?.first,
+              let encrypted = Data(base64Encoded: value)
+        else { throw ZapError("Local history is damaged.") }
+        let payload = try JSONDecoder().decode(Payload.self, from: VaultCrypto.open(encrypted, key: localKey, aad: id))
+        try payload.validate()
+        cached[id] = payload
+        return payload
+    }
+
     func save(_ clip: Clip) throws {
         try clip.payload.validate()
         let encrypted = try VaultCrypto.seal(JSONEncoder().encode(clip.payload), key: localKey, aad: clip.id)
-        try execute("INSERT OR REPLACE INTO clips VALUES(?,?,?,?)", [clip.id, String(clip.payload.createdAt), encrypted.base64EncodedString(), clip.pending ? "1" : "0"])
+        try execute(
+            "INSERT OR REPLACE INTO clips VALUES(?,?,?,?)",
+            [clip.id, String(clip.payload.createdAt), encrypted.base64EncodedString(), clip.pending ? "1" : "0"]
+        )
         cached[clip.id] = clip.payload
         damagedIDs.remove(clip.id)
     }
-    func sent(_ id: String) throws { try execute("UPDATE clips SET pending=0 WHERE id=?", [id]) }
-    func markAllPending() throws { try execute("UPDATE clips SET pending=1") }
+
+    func sent(_ id: String) throws {
+        try execute("UPDATE clips SET pending=0 WHERE id=?", [id])
+    }
+
+    func markAllPending() throws {
+        try execute("UPDATE clips SET pending=1")
+    }
+
+    /// Deletes a clip. With `queue`, also records the deletion for the next sync to send.
     func remove(_ id: String, queue: Bool = false) throws {
         if queue { try execute("INSERT OR IGNORE INTO deletions VALUES(?)", [id]) }
         try execute("DELETE FROM clips WHERE id=?", [id])
         cached.removeValue(forKey: id)
         damagedIDs.remove(id)
     }
-    func deletions() throws -> [String] { try rows("SELECT id FROM deletions").map { $0[0] } }
-    func deleted(_ id: String) throws { try execute("DELETE FROM deletions WHERE id=?", [id]) }
+
+    func deletions() throws -> [String] {
+        try rows("SELECT id FROM deletions").map { $0[0] }
+    }
+
+    /// Marks a queued deletion as sent.
+    func deleted(_ id: String) throws {
+        try execute("DELETE FROM deletions WHERE id=?", [id])
+    }
+
+    /// Removes clips older than the retention window. Damaged rows stay for recovery.
     func expire(days: Int) throws {
         _ = try all()
-        for row in try rows("SELECT id FROM clips WHERE created<?", [String(Int64(Date().timeIntervalSince1970 * 1000) - Int64(days) * 86_400_000)]) where !damagedIDs.contains(row[0]) { try remove(row[0]) }
+        let cutoff = Int64(Date().timeIntervalSince1970 * 1000) - Int64(days) * 86_400_000
+        for row in try rows("SELECT id FROM clips WHERE created<?", [String(cutoff)]) where !damagedIDs.contains(row[0]) {
+            try remove(row[0])
+        }
+    }
+
+    private func execute(_ sql: String, _ args: [String] = []) throws {
+        let statement = try prepare(sql, args)
+        defer { sqlite3_finalize(statement) }
+        var result = sqlite3_step(statement)
+        while result == SQLITE_ROW { result = sqlite3_step(statement) }
+        guard result == SQLITE_DONE else { throw ZapError("Could not save local history.") }
+    }
+
+    private func prepare(_ sql: String, _ args: [String]) throws -> OpaquePointer {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
+            throw ZapError("Could not read local history.")
+        }
+        for (index, value) in args.enumerated() {
+            sqlite3_bind_text(statement, Int32(index + 1), value, -1, SQLITE_TRANSIENT)
+        }
+        return statement
+    }
+
+    private func rows(_ sql: String, _ args: [String] = []) throws -> [[String]] {
+        let statement = try prepare(sql, args)
+        defer { sqlite3_finalize(statement) }
+        var result: [[String]] = []
+        var status = sqlite3_step(statement)
+        while status == SQLITE_ROW {
+            result.append((0..<sqlite3_column_count(statement)).map { column in
+                guard let text = sqlite3_column_text(statement, column) else { return "" }
+                return String(cString: text)
+            })
+            status = sqlite3_step(statement)
+        }
+        guard status == SQLITE_DONE else { throw ZapError("Could not read local history.") }
+        return result
     }
 }

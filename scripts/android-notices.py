@@ -16,6 +16,9 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 CACHE = Path(os.environ.get("GRADLE_USER_HOME", Path.home() / ".gradle")) / "caches/modules-2/files-2.1"
 NS = {"m": "http://maven.apache.org/POM/4.0.0"}
+ACCEPTED_LICENSES = {"The Apache Software License, Version 2.0", "The Apache License, Version 2.0"}
+PUBLIC_SUFFIX_DATA = "okhttp3/internal/publicsuffix/publicsuffixes.gz"
+NOTICE_WORDS = ("license", "notice", "copying", "copyright")
 
 
 def pom_license(coordinate, seen=None):
@@ -40,8 +43,7 @@ def pom_license(coordinate, seen=None):
             raise ValueError(f"Missing license: {coordinate}")
         parent_coordinate = ":".join(parent.findtext(f"m:{key}", namespaces=NS) for key in ("groupId", "artifactId", "version"))
         return pom_license(parent_coordinate, seen)
-    accepted = {"The Apache Software License, Version 2.0", "The Apache License, Version 2.0"}
-    if any(name not in accepted for name in licenses):
+    if any(name not in ACCEPTED_LICENSES for name in licenses):
         raise ValueError(f"Review new license before updating notices: {coordinate}: {licenses}")
     return "Apache-2.0", url
 
@@ -66,46 +68,49 @@ def suffix_source(data, coordinate):
     return header + rules + b"\n" + b"".join(b"!" + rule + b"\n" for rule in exceptions.splitlines())
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--check", action="store_true", help="Fail if committed notices differ; do not write")
-    args = parser.parse_args()
-    inventory = json.loads((ROOT / "dist/audit/android-app.json").read_text())
-    coordinates = sorted(key for key, scopes in inventory.items() if "releaseRuntimeClasspath" in scopes)
-    if not coordinates:
-        raise ValueError("Empty runtime graph; regenerate the Gradle inventory first")
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        licenses = dict(zip(coordinates, pool.map(pom_license, coordinates)))
-    output = ROOT / "licenses/android"
-    apache = (output / "Apache-2.0.txt").read_text().strip()
+def artifact_files(coordinate):
+    # Platforms and multiplatform metadata modules can have no binary artifact.
+    group, artifact, version = coordinate.split(":")
+    files = sorted((CACHE / group / artifact / version).glob("*/*"))
+    return [file for file in files if file.suffix in (".jar", ".aar") and not file.name.endswith(("-sources.jar", "-javadoc.jar"))]
+
+
+def archive_entries(archive, prefix=""):
+    for name in archive.namelist():
+        if name.endswith("/"):
+            continue
+        if name == "classes.jar":
+            with zipfile.ZipFile(io.BytesIO(archive.read(name))) as nested:
+                yield from archive_entries(nested, prefix + name + "!")
+        else:
+            yield prefix + name, name, archive
+
+
+def is_notice(name):
+    return any(word in name.lower() for word in NOTICE_WORDS) and not name.endswith(".class")
+
+
+def collect_notices(coordinates, apache):
     notices = {}
     suffix = None
     for coordinate in coordinates:
-        group, artifact, version = coordinate.split(":")
-        files = sorted((CACHE / group / artifact / version).glob("*/*"))
-        files = [file for file in files if file.suffix in (".jar", ".aar") and not file.name.endswith(("-sources.jar", "-javadoc.jar"))]
-        # Platforms and multiplatform metadata modules can have no binary artifact.
-        for file in files:
-            def scan(archive, prefix=""):
-                nonlocal suffix
-                for name in archive.namelist():
-                    if name.endswith("/"):
-                        continue
-                    if name == "classes.jar":
-                        with zipfile.ZipFile(io.BytesIO(archive.read(name))) as nested:
-                            scan(nested, prefix + name + "!")
-                    elif name == "okhttp3/internal/publicsuffix/publicsuffixes.gz":
+        for file in artifact_files(coordinate):
+            with zipfile.ZipFile(file) as archive:
+                for path, name, source in archive_entries(archive):
+                    if name == PUBLIC_SUFFIX_DATA:
                         if suffix is not None:
                             raise ValueError("Multiple public suffix artifacts; review manually")
-                        suffix = suffix_source(archive.read(name), coordinate)
-                    elif any(word in name.lower() for word in ("license", "notice", "copying", "copyright")) and not name.endswith(".class"):
-                        text = archive.read(name).decode("utf-8").strip()
+                        suffix = suffix_source(source.read(name), coordinate)
+                    elif is_notice(name):
+                        text = source.read(name).decode("utf-8").strip()
                         if text and text != apache:
-                            notices[f"{coordinate}!{prefix}{name}"] = text
-            with zipfile.ZipFile(file) as archive:
-                scan(archive)
+                            notices[f"{coordinate}!{path}"] = text
     if suffix is None:
         raise ValueError("OkHttp public suffix data missing; resolve runtime artifacts before generating notices")
+    return notices, suffix
+
+
+def notices_document(licenses, notices):
     lines = [
         "Zap Android — third-party notices", "",
         "Generated by scripts/android-notices.py from releaseRuntimeClasspath.",
@@ -126,7 +131,27 @@ def main():
         "Its corresponding rule source accompanies this app in okhttp-public-suffix-list.txt.",
         "The rules were decoded from the distributed gzip data without changing them.", "",
     ])
-    generated = {"THIRD_PARTY_NOTICES.txt": "\n".join(lines).encode(), "okhttp-public-suffix-list.txt": suffix}
+    return "\n".join(lines).encode()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--check", action="store_true", help="Fail if committed notices differ; do not write")
+    args = parser.parse_args()
+    inventory = json.loads((ROOT / "dist/audit/android-app.json").read_text())
+    coordinates = sorted(key for key, scopes in inventory.items() if "releaseRuntimeClasspath" in scopes)
+    if not coordinates:
+        raise ValueError("Empty runtime graph; regenerate the Gradle inventory first")
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        licenses = dict(zip(coordinates, pool.map(pom_license, coordinates)))
+
+    output = ROOT / "licenses/android"
+    apache = (output / "Apache-2.0.txt").read_text().strip()
+    notices, suffix = collect_notices(coordinates, apache)
+    generated = {
+        "THIRD_PARTY_NOTICES.txt": notices_document(licenses, notices),
+        "okhttp-public-suffix-list.txt": suffix,
+    }
     for name, data in generated.items():
         path = output / name
         if args.check:
