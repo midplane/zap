@@ -6,6 +6,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
+import android.os.SystemClock
 import androidx.room.Room
 import androidx.work.*
 import kotlinx.coroutines.*
@@ -28,6 +29,9 @@ private const val MAX_IMAGE_BYTES = 20 * 1024 * 1024
 private const val MAX_IMAGE_PIXELS = 40_000_000L
 private const val INITIAL_RECONNECT_DELAY_MS = 2_000L
 private const val MAX_RECONNECT_DELAY_MS = 120_000L
+/** Pooled connections idle longer than this, counting deep sleep, are not reused. */
+private const val STALE_CONNECTION_MS = 60_000L
+private const val DOWNLOAD_BATCH = 8
 private const val REFRESH_WORK = "zap-refresh"
 private const val SEND_WORK = "zap-send"
 
@@ -91,6 +95,7 @@ class Repository(private val context: Context) {
     private var inForeground = false
     private var reconnectJob: Job? = null
     private var reconnectDelay = INITIAL_RECONNECT_DELAY_MS
+    private var lastNetworkUse = 0L
 
     val clips = MutableStateFlow<List<Clip>>(emptyList())
     val days = MutableStateFlow(prefs.getInt(PREF_DAYS, 10))
@@ -480,29 +485,36 @@ class Repository(private val context: Context) {
         val remoteIds = items.map { it.getString("id") }.toSet()
         val localIds = clips.value.map { it.id }.toSet()
         for (clip in dao.all().filter { !it.pending && it.id !in remoteIds }) removeLocal(clip.id)
-        for (item in items.filter { it.getString("id") !in localIds }) {
-            val id = item.getString("id")
-            try {
-                download(item)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: ApiException) {
-                if (e.status == 401) throw e
-                if (e.status != 404) unavailableIds.add(id)
-            } catch (e: IOException) {
-                throw e
-            } catch (e: Exception) {
-                unavailableIds.add(id)
+        // Each download is a round trip, so fetch several at once and show each batch as it lands.
+        for (batch in items.filter { it.getString("id") !in localIds }.chunked(DOWNLOAD_BATCH)) {
+            val results = coroutineScope {
+                batch.map { item -> async { runCatching { download(item) } } }.awaitAll()
             }
+            var failure: Throwable? = null
+            for ((item, result) in batch.zip(results)) {
+                val id = item.getString("id")
+                result.onSuccess { save(it) }.onFailure { e ->
+                    when {
+                        e is CancellationException -> throw e
+                        e is ApiException && e.status == 401 -> failure = failure ?: e
+                        e is ApiException -> if (e.status != 404) unavailableIds.add(id)
+                        e is IOException -> failure = failure ?: e
+                        else -> unavailableIds.add(id)
+                    }
+                }
+            }
+            failure?.let { throw it }
+            refresh()
         }
     }
 
-    private suspend fun download(item: JSONObject) {
+    /** Fetches and decrypts one item. Safe to run concurrently; the caller saves it. */
+    private fun download(item: JSONObject): Clip {
         val id = item.getString("id")
         val raw = Crypto.open(request("/v1/items/$id"), identity.key(item.getString("keyId")), id)
         val payload = JSONObject(String(raw))
         require(payload.getLong("createdAt") == item.getLong("createdAt")) { "Content metadata did not match" }
-        save(Clip(id, item.getLong("createdAt"), payload, pending = false))
+        return Clip(id, item.getLong("createdAt"), payload, pending = false)
     }
 
     private suspend fun uploadPending() {
@@ -527,6 +539,7 @@ class Repository(private val context: Context) {
         headers: Map<String, String> = emptyMap(),
         url: String = identity.value("url")
     ): ByteArray {
+        dropStaleConnections()
         val builder = Request.Builder().url(url + path)
         // The device token is only sent to the server this phone is connected to.
         if (url == identity.value("url") && identity.connected) builder.header("Authorization", "Bearer ${identity.value("token")}")
@@ -544,6 +557,17 @@ class Repository(private val context: Context) {
         }
     }
 
+    /**
+     * OkHttp ages pooled connections with a clock that stops while the phone sleeps, so after hours asleep a
+     * connection whose carrier NAT mapping or Wi-Fi association is long gone still looks fresh. A request
+     * sent on it gets no answer and waits out the read timeout before failing. Reconnecting costs one handshake.
+     */
+    @Synchronized private fun dropStaleConnections() {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastNetworkUse > STALE_CONNECTION_MS) http.connectionPool.evictAll()
+        lastNetworkUse = now
+    }
+
     @Synchronized fun onForegroundChanged(visible: Boolean) {
         inForeground = visible
         if (visible) {
@@ -557,6 +581,7 @@ class Repository(private val context: Context) {
 
     @Synchronized private fun connectSocket() {
         if (!inForeground || !identity.connected || socket != null) return
+        dropStaleConnections()
         val request = Request.Builder()
             .url(identity.value("url") + "/v1/events")
             .header("Authorization", "Bearer ${identity.value("token")}")
