@@ -76,3 +76,41 @@ test("vault pairing, retries, deletion, expiry, and revocation", async () => {
     assert.equal((await call("/v1/bootstrap", "POST", "test-setup", { ...registration, ...identity() })).status, 200);
   } finally { await mf.dispose(); }
 });
+
+test("pinned items outlive retention, and devices report when they were last seen", async () => {
+  const bundle = await build({ entryPoints: ["src/index.ts"], bundle: true, write: false, format: "esm", platform: "neutral", external: ["cloudflare:workers"] });
+  const mf = new Miniflare({ modules: true, script: bundle.outputFiles[0].text, compatibilityDate: "2025-09-01", durableObjects: { VAULT: { className: "Vault", useSQLite: true } }, r2Buckets: ["BLOBS"], bindings: { BOOTSTRAP_TOKEN: "test-setup" } });
+  try {
+    const envelope = { ephemeralPublicKey: "A".repeat(88), nonce: "A".repeat(16), ciphertext: "A".repeat(64) };
+    const keyId = crypto.randomUUID();
+    const call = (path: string, method = "GET", token = "", body?: unknown, headers = {}) => mf.dispatchFetch("https://zap.test" + path, { method, headers: { Authorization: `Bearer ${token}`, ...headers }, body: body === undefined ? undefined : body instanceof Uint8Array ? body : JSON.stringify(body) });
+    const mac = await (await call("/v1/bootstrap", "POST", "test-setup", { name: "Mac", keyId, publicKey: "A".repeat(88), envelope, enrollmentId: crypto.randomUUID(), deviceToken: secret() })).json() as any;
+    const blob = crypto.getRandomValues(new Uint8Array(64));
+    const upload = (id: string, createdAt: number, extra = {}) => call(`/v1/items/${id}`, "PUT", mac.token, blob, { "X-Key-Id": keyId, "X-Created-At": String(createdAt), "Content-Length": "64", ...extra });
+
+    const kept = crypto.randomUUID(), loose = crypto.randomUUID(), oldPinned = crypto.randomUUID();
+    assert.equal((await upload(kept, Date.now() - 2 * DAY)).status, 200);
+    assert.equal((await upload(loose, Date.now() - 2 * DAY)).status, 200);
+    // An old item is only accepted when it arrives pinned.
+    assert.equal((await upload(oldPinned, Date.now() - 30 * DAY)).status, 410);
+    assert.equal((await upload(oldPinned, Date.now() - 30 * DAY, { "X-Pinned": "1" })).status, 200);
+
+    assert.equal((await call(`/v1/items/${kept}/pin`, "PUT", mac.token, { pinned: "yes" })).status, 400);
+    assert.equal((await call(`/v1/items/${crypto.randomUUID()}/pin`, "PUT", mac.token, { pinned: true })).status, 404);
+    assert.equal((await call(`/v1/items/${kept}/pin`, "PUT", mac.token, { pinned: true })).status, 200);
+    await call("/v1/settings", "PUT", mac.token, { days: 1 });
+
+    const state = await (await call("/v1/sync", "GET", mac.token, undefined, { "User-Agent": "Zap/1 CFNetwork/1 Darwin/25" })).json() as any;
+    assert.deepEqual(state.items.map((item: any) => [item.id, item.pinned]).sort(), [[kept, true], [oldPinned, true]].sort());
+    assert.equal((await call(`/v1/items/${kept}`, "GET", mac.token)).status, 200);
+    assert.equal((await call(`/v1/items/${loose}`, "GET", mac.token)).status, 404);
+
+    // Unpinning returns an item to the retention window.
+    assert.equal((await call(`/v1/items/${kept}/pin`, "PUT", mac.token, { pinned: false })).status, 200);
+    assert.equal((await call(`/v1/items/${kept}`, "GET", mac.token)).status, 404);
+
+    const [device] = state.devices;
+    assert.equal(device.platform, "mac");
+    assert.ok(Date.now() - device.lastSeen < 60_000);
+  } finally { await mf.dispose(); }
+});

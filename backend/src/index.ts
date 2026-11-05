@@ -29,6 +29,9 @@ const MIN_SEALED_SIZE = 28;
 const ALARM_SOON = 60_000;
 const ALARM_IDLE = 60 * 60_000;
 const ITEM_PATH = /^\/v1\/items\/([a-zA-Z0-9_-]{16,100})$/;
+const PIN_PATH = /^\/v1\/items\/([a-zA-Z0-9_-]{16,100})\/pin$/;
+/** Last-seen times are only written when they are at least this stale, to keep requests read-only. */
+const SEEN_RESOLUTION = 60_000;
 
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY CHECK(id=1), days INTEGER NOT NULL, revision INTEGER NOT NULL, keyId TEXT NOT NULL);
@@ -142,6 +145,15 @@ export class Vault extends DurableObject<Env> {
     super(ctx, env);
     this.sql = ctx.storage.sql;
     this.sql.exec(SCHEMA);
+    // Columns added after the first release. Existing rows get the defaults.
+    this.addColumn("items", "pinned", "INTEGER NOT NULL DEFAULT 0");
+    this.addColumn("devices", "lastSeen", "INTEGER NOT NULL DEFAULT 0");
+    this.addColumn("devices", "platform", "TEXT NOT NULL DEFAULT ''");
+  }
+
+  private addColumn(table: string, column: string, definition: string) {
+    const exists = this.rows(`PRAGMA table_info(${table})`).some(row => row.name === column);
+    if (!exists) this.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -172,6 +184,7 @@ export class Vault extends DurableObject<Env> {
     if (!device) fail("Device is not connected. Pair it again.", 401);
     // A registered device implies an initialized deployment.
     const settings = this.settings()!;
+    this.markSeen(device, request);
 
     if (path === "/v1/events" && request.headers.get("Upgrade")?.toLowerCase() === "websocket") return this.openEvents(device);
     if (path === "/v1/sync" && method === "GET") return this.snapshot(url, device, settings);
@@ -185,6 +198,9 @@ export class Vault extends DurableObject<Env> {
     if (itemID && method === "GET") return this.download(itemID, settings);
     if (itemID && method === "DELETE") return this.deleteItem(itemID);
     if (itemID && method === "PUT") return this.upload(request, itemID, device, settings);
+
+    const pinID = path.match(PIN_PATH)?.[1];
+    if (pinID && method === "PUT") return this.setPinned(request, pinID);
 
     return json({ error: "Not found." }, 404);
   }
@@ -249,7 +265,7 @@ export class Vault extends DurableObject<Env> {
   }
 
   private insertDevice(enrollment: Enrollment, body: JSONObject, envelope: string) {
-    this.sql.exec("INSERT INTO devices VALUES(?,?,?,?)", enrollment.id, body.name, enrollment.hash, body.publicKey);
+    this.sql.exec("INSERT INTO devices (id,name,token,publicKey) VALUES(?,?,?,?)", enrollment.id, body.name, enrollment.hash, body.publicKey);
     this.sql.exec("INSERT INTO keys VALUES(?,?,?)", enrollment.id, body.keyId, envelope);
     this.sql.exec("INSERT INTO enrollments VALUES(?,?)", enrollment.id, enrollment.fingerprint);
   }
@@ -264,10 +280,11 @@ export class Vault extends DurableObject<Env> {
     const cursor = Number(url.searchParams.get("cursor") || -1);
     const keys = this.rows("SELECT keyId,envelope FROM keys WHERE deviceId=?", device.id)
       .map(key => ({ keyId: key.keyId, envelope: JSON.parse(String(key.envelope)) }));
-    const devices = this.rows("SELECT id,name,publicKey FROM devices ORDER BY name");
+    const devices = this.rows("SELECT id,name,publicKey,lastSeen,platform FROM devices ORDER BY name");
     const items = cursor === settings.revision
       ? null
-      : this.rows("SELECT * FROM items WHERE createdAt>? ORDER BY createdAt DESC", Date.now() - Number(settings.days) * DAY);
+      : this.rows("SELECT * FROM items WHERE createdAt>? OR pinned=1 ORDER BY createdAt DESC", Date.now() - Number(settings.days) * DAY)
+        .map(item => ({ ...item, pinned: item.pinned === 1 }));
     return json({ cursor: settings.revision, days: settings.days, keyId: settings.keyId, keys, devices, items });
   }
 
@@ -340,7 +357,7 @@ export class Vault extends DurableObject<Env> {
 
   private async download(id: string, settings: Row): Promise<Response> {
     const item = this.first("SELECT * FROM items WHERE id=?", id);
-    if (!item || !active(Number(item.createdAt), Number(settings.days))) fail("Item expired or was deleted.", 404);
+    if (!item || !(item.pinned || active(Number(item.createdAt), Number(settings.days)))) fail("Item expired or was deleted.", 404);
     const blob = await this.env.BLOBS.get(id);
     if (!blob) fail("Content unavailable. Try again.", 503);
     return new Response(blob.body, { headers: { "Content-Type": "application/octet-stream", "Cache-Control": "no-store" } });
@@ -360,7 +377,9 @@ export class Vault extends DurableObject<Env> {
     try {
       const createdAt = Number(request.headers.get("X-Created-At"));
       const keyId = request.headers.get("X-Key-Id") || "";
-      if (!active(createdAt, Number(settings.days))) fail("Item has expired.", 410);
+      // Pinned items are exempt from retention, so an old pinned item may still be uploaded.
+      const pinned = request.headers.get("X-Pinned") === "1";
+      if (!Number.isSafeInteger(createdAt) || (!pinned && !active(createdAt, Number(settings.days)))) fail("Item has expired.", 410);
       if (keyId !== settings.keyId) fail("Refresh encryption keys and retry.", 409);
       if (this.first("SELECT id FROM items WHERE id=?", id)) return ok();
 
@@ -381,19 +400,39 @@ export class Vault extends DurableObject<Env> {
       const stale = this.isTombstoned(id)
         || current?.keyId !== keyId
         || !this.deviceExists(device.id)
-        || !active(createdAt, Number(current?.days));
+        || (!pinned && !active(createdAt, Number(current?.days)));
       if (stale) {
         this.sql.exec("INSERT OR IGNORE INTO garbage VALUES(?)", id);
         await this.scheduleAlarm();
         fail("State changed. Refresh and retry.", 409);
       }
 
-      this.sql.exec("INSERT OR IGNORE INTO items VALUES(?,?,?,?,?)", id, device.id, keyId, createdAt, length);
+      this.sql.exec("INSERT OR IGNORE INTO items (id,deviceId,keyId,createdAt,size,pinned) VALUES(?,?,?,?,?,?)", id, device.id, keyId, createdAt, length, pinned ? 1 : 0);
       this.broadcastChange();
       return ok();
     } finally {
       this.uploads.delete(id);
     }
+  }
+
+  private async setPinned(request: Request, id: string): Promise<Response> {
+    const { pinned } = await readJSONObject(request);
+    if (typeof pinned !== "boolean") fail("Expected pinned to be true or false.");
+    if (!this.first("SELECT id FROM items WHERE id=?", id)) fail("Item expired or was deleted.", 404);
+    this.sql.exec("UPDATE items SET pinned=? WHERE id=?", pinned ? 1 : 0, id);
+    this.broadcastChange();
+    // Unpinning can move an item outside retention.
+    if (!pinned) await this.scheduleAlarm();
+    return ok();
+  }
+
+  /** Records when a device last reached the server, and which app it runs, for the device list. */
+  private markSeen(device: Row, request: Request) {
+    const now = Date.now();
+    const agent = request.headers.get("User-Agent") || "";
+    const platform = /okhttp|android/i.test(agent) ? "android" : /darwin|cfnetwork|mac/i.test(agent) ? "mac" : String(device.platform || "");
+    if (now - Number(device.lastSeen) < SEEN_RESOLUTION && platform === device.platform) return;
+    this.sql.exec("UPDATE devices SET lastSeen=?, platform=? WHERE id=?", now, platform, device.id);
   }
 
   private removeItem(id: string) {
@@ -422,7 +461,7 @@ export class Vault extends DurableObject<Env> {
   }
 
   private expireItems(settings: Row) {
-    const expired = this.rows("SELECT id FROM items WHERE createdAt<=?", Date.now() - Number(settings.days) * DAY);
+    const expired = this.rows("SELECT id FROM items WHERE createdAt<=? AND pinned=0", Date.now() - Number(settings.days) * DAY);
     for (const item of expired) this.removeItem(String(item.id));
     if (expired.length) this.broadcastChange();
   }

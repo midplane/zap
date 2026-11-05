@@ -146,6 +146,8 @@ final class HistoryPanel: NSPanel {
             model.preview = model.selected
         case kVK_ANSI_C where event.modifierFlags.contains(.command):
             if let clip = model.selected { model.copy(clip) }
+        case kVK_ANSI_P where event.modifierFlags.contains(.command):
+            if let clip = model.selected { model.togglePin(clip) }
         default:
             return false
         }

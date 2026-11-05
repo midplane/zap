@@ -1,10 +1,12 @@
 package dev.midplane.zap
 
+import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.PersistableBundle
 import androidx.activity.ComponentActivity
@@ -12,9 +14,13 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -22,11 +28,15 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -38,6 +48,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -45,12 +56,21 @@ import androidx.lifecycle.lifecycleScope
 import coil.compose.AsyncImage
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import java.io.File
 import java.text.DateFormat
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.time.format.FormatStyle
+import java.time.format.TextStyle
 import java.util.Date
+import java.util.Locale
 
 class MainActivity : ComponentActivity() {
     private val repository get() = (application as ZapApplication).repository
@@ -145,10 +165,13 @@ fun ZapScreen(
     finishShare: () -> Unit
 ) {
     val error by repository.error.collectAsStateWithLifecycle()
+    val clips by repository.clips.collectAsStateWithLifecycle()
     var showSettings by remember { mutableStateOf(false) }
     var search by remember { mutableStateOf("") }
     var filter by remember { mutableStateOf(ContentFilter.ALL) }
-    var preview by remember { mutableStateOf<Clip?>(null) }
+    var previewId by remember { mutableStateOf<String?>(null) }
+    // Deleted items stay hidden while their Undo is offered, and are deleted when it expires.
+    var undoableDeletes by remember { mutableStateOf(emptySet<String>()) }
     var pairingCode by remember { mutableStateOf<String?>(null) }
     var enteringCode by remember { mutableStateOf(false) }
     var pairingBusy by remember { mutableStateOf(false) }
@@ -162,6 +185,29 @@ fun ZapScreen(
                 action()
             } catch (e: Exception) {
                 repository.error.value = e.message
+            }
+        }
+    }
+
+    fun copy(clip: Clip) = runAction {
+        copyClip(context, clip)
+        // Android 13 and later confirm every copy with their own clipboard preview.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) snackbar.showSnackbar("Copied")
+    }
+
+    fun delete(clip: Clip) {
+        previewId = null
+        undoableDeletes = undoableDeletes + clip.id
+        scope.launch {
+            try {
+                val result = snackbar.showSnackbar("Deleted", "Undo", duration = SnackbarDuration.Short)
+                if (result != SnackbarResult.ActionPerformed) repository.delete(clip)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                repository.error.value = e.message
+            } finally {
+                undoableDeletes = undoableDeletes - clip.id
             }
         }
     }
@@ -226,42 +272,37 @@ fun ZapScreen(
             } else {
                 HistoryContent(
                     repository,
+                    hidden = undoableDeletes,
                     search = search,
                     onSearchChange = { search = it },
                     filter = filter,
                     onFilterChange = { filter = it },
                     onOpenSettings = { showSettings = true },
-                    onPreview = { preview = it },
-                    onCopy = { clip ->
-                        runAction {
-                            copyClip(context, clip)
-                            snackbar.showSnackbar("Copied")
-                        }
-                    },
-                    onSync = { runAction { repository.sync() } }
+                    onPreview = { previewId = it.id },
+                    onCopy = ::copy
                 )
             }
         }
     }
 
-    preview?.let { clip ->
+    clips.firstOrNull { it.id == previewId }?.let { clip ->
         PreviewSheet(
             clip,
-            onDismiss = { preview = null },
+            onDismiss = { previewId = null },
             onCopy = {
-                runAction {
-                    copyClip(context, clip)
-                    preview = null
-                    snackbar.showSnackbar("Copied")
+                copy(clip)
+                previewId = null
+            },
+            onOpen = { link ->
+                try {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(link)))
+                } catch (e: ActivityNotFoundException) {
+                    repository.error.value = "No app on this phone can open that link."
                 }
             },
+            onPin = { runAction { repository.setPinned(clip, !clip.pinned) } },
             onShare = { runAction { shareClip(context, clip) } },
-            onDelete = {
-                runAction {
-                    repository.delete(clip)
-                    preview = null
-                }
-            }
+            onDelete = { delete(clip) }
         )
     }
     if (enteringCode) {
@@ -313,18 +354,15 @@ private fun ZapTopBar(
                     Image(
                         painterResource(R.drawable.ic_zap_foreground),
                         null,
-                        Modifier.size(44.dp).background(colorResource(R.color.zap_icon_background), RoundedCornerShape(12.dp))
+                        Modifier.size(40.dp).background(colorResource(R.color.zap_icon_background), RoundedCornerShape(11.dp))
                     )
-                    Column {
-                        Text("Zap", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
-                        Text("Clipboard history", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
+                    Text("Zap", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
                 }
             }
         },
         navigationIcon = {
             if (showSettings) {
-                IconButton(onClick = onCloseSettings) { Icon(Icons.Outlined.ArrowBack, "Back") }
+                IconButton(onClick = onCloseSettings) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "Back") }
             }
         },
         actions = {
@@ -336,22 +374,28 @@ private fun ZapTopBar(
     )
 }
 
+/** Statuses that need no attention. The status line hides for these. */
+private val QUIET_STATUSES = setOf("Up to date", "Local history")
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 private fun HistoryContent(
     repository: Repository,
+    hidden: Set<String>,
     search: String,
     onSearchChange: (String) -> Unit,
     filter: ContentFilter,
     onFilterChange: (ContentFilter) -> Unit,
     onOpenSettings: () -> Unit,
     onPreview: (Clip) -> Unit,
-    onCopy: (Clip) -> Unit,
-    onSync: () -> Unit
+    onCopy: (Clip) -> Unit
 ) {
     val clips by repository.clips.collectAsStateWithLifecycle()
     val status by repository.status.collectAsStateWithLifecycle()
     val recovery by repository.recovery.collectAsStateWithLifecycle()
     val connected by repository.connected.collectAsStateWithLifecycle()
+    var refreshing by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
 
     Column(Modifier.widthIn(max = 760.dp).fillMaxSize()) {
         OutlinedTextField(
@@ -370,48 +414,87 @@ private fun HistoryContent(
         )
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             for (choice in enumValues<ContentFilter>()) {
                 FilterChip(selected = filter == choice, onClick = { onFilterChange(choice) }, label = { Text(choice.label) })
             }
-            Spacer(Modifier.weight(1f))
-            IconButton(onClick = onSync) { Icon(Icons.Outlined.Sync, "Sync now") }
         }
 
         val pending = clips.count { it.pending }
-        Text(
-            if (connected && pending > 0) "$pending waiting to sync" else status,
-            Modifier.padding(start = 24.dp, end = 24.dp, bottom = 8.dp),
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
+        val statusLine = when {
+            connected && pending > 0 -> "$pending waiting to sync"
+            status !in QUIET_STATUSES -> status
+            else -> null
+        }
+        statusLine?.let {
+            Text(
+                it,
+                Modifier.padding(start = 24.dp, end = 24.dp, bottom = 8.dp),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
         if (recovery != null) {
             TextButton(onClick = onOpenSettings, modifier = Modifier.padding(horizontal = 16.dp)) { Text("Some items need recovery") }
         }
 
         val visible = clips.filter {
-            filter.includes(it) && (search.isBlank() || it.text.contains(search, true) || it.source.contains(search, true))
+            it.id !in hidden && filter.includes(it) &&
+                (search.isBlank() || it.text.contains(search, true) || it.source.contains(search, true))
         }
-        if (visible.isEmpty()) {
-            EmptyHistory(
-                searching = search.isNotEmpty(),
-                filter = filter,
-                connected = connected,
-                onConnect = onOpenSettings,
-                modifier = Modifier.weight(1f)
-            )
-        } else {
-            // Bottom padding keeps the last item clear of the floating button.
-            LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(bottom = 100.dp)) {
-                items(visible, key = { it.id }) { clip ->
-                    ClipListItem(clip, onClick = { onPreview(clip) }, onCopy = { onCopy(clip) })
-                    HorizontalDivider(Modifier.padding(start = 72.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
+        val groups = remember(visible) { groupByDay(visible) }
+        PullToRefreshBox(
+            isRefreshing = refreshing,
+            onRefresh = {
+                scope.launch {
+                    refreshing = true
+                    try {
+                        repository.sync()
+                    } finally {
+                        refreshing = false
+                    }
+                }
+            },
+            modifier = Modifier.weight(1f)
+        ) {
+            if (visible.isEmpty()) {
+                EmptyHistory(
+                    searching = search.isNotEmpty(),
+                    filter = filter,
+                    connected = connected,
+                    onConnect = onOpenSettings,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                // Bottom padding keeps the last item clear of the floating button.
+                LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 100.dp)) {
+                    for ((heading, group) in groups) {
+                        stickyHeader(key = "heading:$heading") { DayHeading(heading) }
+                        items(group, key = { it.id }) { clip ->
+                            ClipListItem(
+                                clip,
+                                time = if (heading == TODAY) relativeTime(clip.createdAt) else timeOfDay(clip.createdAt),
+                                onCopy = { onCopy(clip) },
+                                onPreview = { onPreview(clip) },
+                                modifier = Modifier.animateItem()
+                            )
+                        }
+                    }
                 }
             }
         }
     }
+}
+
+@Composable
+private fun DayHeading(text: String) {
+    Text(
+        text,
+        Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface).padding(start = 20.dp, end = 20.dp, top = 16.dp, bottom = 4.dp),
+        style = MaterialTheme.typography.titleSmall,
+        color = MaterialTheme.colorScheme.primary
+    )
 }
 
 @Composable
@@ -422,11 +505,13 @@ private fun EmptyHistory(searching: Boolean, filter: ContentFilter, connected: B
         else -> "No ${filter.label.lowercase()} yet"
     }
     val message = if (searching) "Try another word or content filter." else "Share text or an image to Zap, or add what you’ve copied."
+    // Scrollable so pull-to-refresh also works on an empty list.
     Column(
-        modifier.fillMaxWidth().padding(32.dp),
+        modifier.verticalScroll(rememberScrollState()).padding(32.dp),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
+        Spacer(Modifier.height(48.dp))
         Icon(
             if (searching) Icons.Outlined.Search else Icons.Outlined.ContentPaste,
             null,
@@ -444,33 +529,45 @@ private fun EmptyHistory(searching: Boolean, filter: ContentFilter, connected: B
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ClipListItem(clip: Clip, onClick: () -> Unit, onCopy: () -> Unit) {
+private fun ClipListItem(clip: Clip, time: String, onCopy: () -> Unit, onPreview: () -> Unit, modifier: Modifier = Modifier) {
     val isImage = clip.kind == "image"
     ListItem(
-        headlineContent = { Text(if (isImage) "Image" else clip.text, maxLines = 3, overflow = TextOverflow.Ellipsis) },
-        supportingContent = { Text("${clip.source} · ${relativeDate(clip.createdAt)}", maxLines = 1, overflow = TextOverflow.Ellipsis) },
-        leadingContent = {
-            if (isImage) {
-                ClipImage(clip, Modifier.size(48.dp))
-            } else {
-                Icon(Icons.Outlined.Notes, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        },
+        headlineContent = { Text(if (isImage) "Image" else clip.text.trim(), maxLines = 3, overflow = TextOverflow.Ellipsis) },
+        supportingContent = { Text("${clip.source} · $time", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        // Only images get a leading element; text starts at the edge.
+        leadingContent = if (isImage) ({ ClipImage(clip, Modifier.size(48.dp)) }) else null,
         trailingContent = {
-            IconButton(onClick = onCopy) { Icon(Icons.Outlined.ContentCopy, if (isImage) "Copy image" else "Copy text") }
+            IconButton(onClick = onPreview) { Icon(Icons.Outlined.OpenInFull, "Preview") }
         },
-        modifier = Modifier.clickable(onClick = onClick).padding(horizontal = 4.dp)
+        modifier = modifier
+            .combinedClickable(
+                onClickLabel = if (isImage) "Copy image" else "Copy text",
+                onLongClickLabel = "Preview",
+                onLongClick = onPreview,
+                onClick = onCopy
+            )
+            .padding(horizontal = 4.dp)
     )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun PreviewSheet(clip: Clip, onDismiss: () -> Unit, onCopy: () -> Unit, onShare: () -> Unit, onDelete: () -> Unit) {
+private fun PreviewSheet(
+    clip: Clip,
+    onDismiss: () -> Unit,
+    onCopy: () -> Unit,
+    onOpen: (String) -> Unit,
+    onPin: () -> Unit,
+    onShare: () -> Unit,
+    onDelete: () -> Unit
+) {
     val isImage = clip.kind == "image"
+    val link = clip.link
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(Modifier.fillMaxWidth().padding(24.dp).navigationBarsPadding(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            Text(if (isImage) "Image" else "Text", style = MaterialTheme.typography.titleLarge)
+            Text("${clip.source} · ${fullTime(clip.createdAt)}", style = MaterialTheme.typography.titleMedium)
             LazyColumn(Modifier.heightIn(max = 360.dp)) {
                 item {
                     if (isImage) {
@@ -480,16 +577,22 @@ private fun PreviewSheet(clip: Clip, onDismiss: () -> Unit, onCopy: () -> Unit, 
                     }
                 }
             }
-            Text(
-                DateFormat.getDateTimeInstance().format(Date(clip.createdAt)),
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = onCopy) { Text("Copy") }
-                FilledTonalButton(onClick = onShare) { Text("Share") }
+                if (link != null) FilledTonalButton(onClick = { onOpen(link) }) { Text("Open") }
                 Spacer(Modifier.weight(1f))
-                TextButton(onClick = onDelete) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+                IconToggleButton(checked = clip.pinned, onCheckedChange = { onPin() }) {
+                    Icon(if (clip.pinned) Icons.Filled.PushPin else Icons.Outlined.PushPin, if (clip.pinned) "Unpin" else "Pin")
+                }
+                IconButton(onClick = onShare) { Icon(Icons.Outlined.Share, "Share") }
+                IconButton(onClick = onDelete) { Icon(Icons.Outlined.Delete, "Delete", tint = MaterialTheme.colorScheme.error) }
+            }
+            if (clip.pinned) {
+                Text(
+                    "Pinned items are kept until you unpin them.",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
     }
@@ -533,6 +636,10 @@ private fun ConfirmPairingDialog(code: String, busy: Boolean, onConnect: () -> U
     )
 }
 
+private val RETENTION_CHOICES = listOf(1, 7, 10, 30, 90, 365)
+
+private fun daysLabel(days: Int) = if (days == 1) "1 day" else "$days days"
+
 @Composable
 private fun SettingsContent(
     repository: Repository,
@@ -548,12 +655,13 @@ private fun SettingsContent(
     val status by repository.status.collectAsStateWithLifecycle()
     val server by repository.server.collectAsStateWithLifecycle()
     val thisDeviceId by repository.deviceId.collectAsStateWithLifecycle()
-    var retention by remember(days) { mutableStateOf(days.toString()) }
+    var choosingRetention by remember { mutableStateOf(false) }
+    var shorterRetention by remember { mutableStateOf<Int?>(null) }
     var confirmingClear by remember { mutableStateOf(false) }
     var confirmingDiscard by remember { mutableStateOf(false) }
     var confirmingDisconnect by remember { mutableStateOf(false) }
     var invitation by remember { mutableStateOf<String?>(null) }
-    var removingDeviceId by remember { mutableStateOf<String?>(null) }
+    var removingDevice by remember { mutableStateOf<JSONObject?>(null) }
     val context = LocalContext.current
 
     LazyColumn(
@@ -563,22 +671,37 @@ private fun SettingsContent(
     ) {
         item {
             Text("History", style = MaterialTheme.typography.titleMedium)
-            Spacer(Modifier.height(12.dp))
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                OutlinedTextField(
-                    retention,
-                    { retention = it.filter(Char::isDigit).take(3) },
-                    Modifier.weight(1f),
-                    label = { Text("Days to keep") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+            Spacer(Modifier.height(4.dp))
+            Box {
+                ListItem(
+                    headlineContent = { Text("Keep history for") },
+                    supportingContent = { Text("Pinned items are kept until you unpin them.") },
+                    trailingContent = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(daysLabel(days), style = MaterialTheme.typography.labelLarge)
+                            Icon(Icons.Outlined.ArrowDropDown, null)
+                        }
+                    },
+                    modifier = Modifier.clickable(role = Role.DropdownList) { choosingRetention = true }
                 )
-                TextButton(
-                    onClick = { onAction { repository.setDays(retention.toInt()) } },
-                    enabled = retention.toIntOrNull() in 1..365 && retention != days.toString()
-                ) { Text("Save") }
+                DropdownMenu(choosingRetention, onDismissRequest = { choosingRetention = false }, offset = DpOffset(200.dp, 0.dp)) {
+                    for (choice in (RETENTION_CHOICES + days).distinct().sorted()) {
+                        DropdownMenuItem(
+                            text = { Text(daysLabel(choice)) },
+                            trailingIcon = { if (choice == days) Icon(Icons.Outlined.Check, "Selected") },
+                            onClick = {
+                                choosingRetention = false
+                                when {
+                                    choice == days -> Unit
+                                    // Shortening deletes items, so it asks first.
+                                    choice < days -> shorterRetention = choice
+                                    else -> onAction { repository.setDays(choice) }
+                                }
+                            }
+                        )
+                    }
+                }
             }
-            TextButton(onClick = { confirmingClear = true }) { Text("Clear history", color = MaterialTheme.colorScheme.error) }
             recovery?.let {
                 Text(it, style = MaterialTheme.typography.bodySmall)
                 TextButton(onClick = { onAction { repository.sync() } }) { Text("Retry recovery") }
@@ -589,7 +712,7 @@ private fun SettingsContent(
         }
         item { HorizontalDivider() }
         item {
-            Text(if (connected) "Connected devices" else "Connect your Mac", style = MaterialTheme.typography.titleMedium)
+            Text(if (connected) "Devices" else "Connect your Mac", style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.height(12.dp))
             if (connected) {
                 Text(server, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -609,35 +732,53 @@ private fun SettingsContent(
             }
         }
         items(devices, key = { it.getString("id") }) { device ->
-            val id = device.getString("id")
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text(device.getString("name"), Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
-                if (id == thisDeviceId) {
-                    Text("This phone", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                } else {
-                    TextButton(onClick = { removingDeviceId = id }) { Text("Remove") }
-                }
-            }
+            val isThis = device.getString("id") == thisDeviceId
+            DeviceRow(device, isThis, onRemove = { removingDevice = device })
         }
         if (connected) {
             item {
                 Column {
-                    SettingsAction("Sync now", "Send pending items and check for new history", Icons.Outlined.Sync) {
-                        onAction { repository.sync() }
-                    }
-                    HorizontalDivider()
                     SettingsAction("Pair another device", "Create a private code for your Mac or phone", Icons.Outlined.QrCodeScanner) {
                         onAction { invitation = repository.invite() }
                     }
                     HorizontalDivider()
-                    SettingsAction("Disconnect", "Keep local history on this phone", Icons.Outlined.LinkOff) {
-                        confirmingDisconnect = true
+                    SettingsAction("Sync now", "Send pending items and check for new history", Icons.Outlined.Sync) {
+                        onAction { repository.sync() }
                     }
                 }
             }
         }
+        // Actions that remove history or this phone's connection stay apart from everyday settings.
+        item { HorizontalDivider() }
+        item {
+            Column {
+                if (connected) {
+                    SettingsAction("Disconnect", "Stop syncing. Local history stays on this phone.", Icons.Outlined.LinkOff) {
+                        confirmingDisconnect = true
+                    }
+                }
+                SettingsAction(
+                    "Clear history",
+                    if (connected) "Delete every item on all your devices" else "Delete every item on this phone",
+                    Icons.Outlined.DeleteForever,
+                    destructive = true
+                ) { confirmingClear = true }
+            }
+        }
     }
 
+    shorterRetention?.let { choice ->
+        ConfirmDialog(
+            title = "Keep ${daysLabel(choice)} of history?",
+            message = "Unpinned items older than ${daysLabel(choice)} will be deleted" + if (connected) " on all your devices." else " from this phone.",
+            confirmLabel = "Delete older items",
+            onConfirm = {
+                shorterRetention = null
+                onAction { repository.setDays(choice) }
+            },
+            onDismiss = { shorterRetention = null }
+        )
+    }
     invitation?.let { code ->
         ConfirmDialog(
             title = "Pair another device",
@@ -665,7 +806,7 @@ private fun SettingsContent(
     if (confirmingClear) {
         ConfirmDialog(
             title = "Clear history?",
-            message = if (connected) "History will be deleted on all connected devices when they sync." else "History will be deleted from this phone.",
+            message = if (connected) "Every item, including pinned ones, will be deleted on all connected devices when they sync." else "Every item, including pinned ones, will be deleted from this phone.",
             confirmLabel = "Clear history",
             onConfirm = {
                 confirmingClear = false
@@ -690,18 +831,50 @@ private fun SettingsContent(
             onDismiss = { confirmingDiscard = false }
         )
     }
-    removingDeviceId?.let { id ->
+    removingDevice?.let { device ->
         ConfirmDialog(
-            title = "Remove this device?",
-            message = "It will no longer receive new items. Content already downloaded remains on that device.",
+            title = "Remove ${device.getString("name")}?",
+            message = "It will stop receiving new items, and your other devices switch to a new encryption key. Content already downloaded stays on that device.",
             confirmLabel = "Remove",
             onConfirm = {
-                removingDeviceId = null
-                onAction { repository.removeDevice(id) }
+                removingDevice = null
+                onAction { repository.removeDevice(device.getString("id")) }
             },
-            onDismiss = { removingDeviceId = null }
+            onDismiss = { removingDevice = null }
         )
     }
+}
+
+@Composable
+private fun DeviceRow(device: JSONObject, isThis: Boolean, onRemove: () -> Unit) {
+    val platform = if (isThis) "android" else device.optString("platform")
+    val lastSeen = device.optLong("lastSeen")
+    ListItem(
+        headlineContent = { Text(device.getString("name"), maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        supportingContent = {
+            Text(
+                when {
+                    isThis -> "This phone"
+                    lastSeen > 0 -> "Last synced ${relativeTime(lastSeen).replaceFirstChar(Char::lowercase)}"
+                    else -> "Waiting for its next sync"
+                }
+            )
+        },
+        leadingContent = {
+            Icon(
+                when (platform) {
+                    "android" -> Icons.Outlined.PhoneAndroid
+                    "mac" -> Icons.Outlined.LaptopMac
+                    else -> Icons.Outlined.Devices
+                },
+                null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        },
+        trailingContent = {
+            if (!isThis) TextButton(onClick = onRemove) { Text("Remove", color = MaterialTheme.colorScheme.error) }
+        }
+    )
 }
 
 @Composable
@@ -716,11 +889,12 @@ private fun ConfirmDialog(title: String, message: String, confirmLabel: String, 
 }
 
 @Composable
-private fun SettingsAction(title: String, description: String, icon: ImageVector, onClick: () -> Unit) {
+private fun SettingsAction(title: String, description: String, icon: ImageVector, destructive: Boolean = false, onClick: () -> Unit) {
+    val tint = if (destructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
     ListItem(
-        headlineContent = { Text(title) },
+        headlineContent = { Text(title, color = if (destructive) MaterialTheme.colorScheme.error else Color.Unspecified) },
         supportingContent = { Text(description) },
-        leadingContent = { Icon(icon, null, tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+        leadingContent = { Icon(icon, null, tint = tint) },
         modifier = Modifier.fillMaxWidth().clickable(role = Role.Button, onClick = onClick).padding(vertical = 4.dp)
     )
 }
@@ -751,14 +925,42 @@ private fun copyPairingCode(context: Context, code: String) {
     context.getSystemService(ClipboardManager::class.java).setPrimaryClip(clip)
 }
 
-private fun relativeDate(time: Long): String {
+private const val TODAY = "Today"
+
+/** History in display order: pinned items first, then one group per day, newest first. */
+private fun groupByDay(clips: List<Clip>): List<Pair<String, List<Clip>>> {
+    val today = LocalDate.now()
+    val zone = ZoneId.systemDefault()
+    val dayFormat = DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM)
+    val (pinned, rest) = clips.partition { it.pinned }
+    val days = rest.groupBy { Instant.ofEpochMilli(it.createdAt).atZone(zone).toLocalDate() }.map { (day, group) ->
+        val heading = when {
+            day == today -> TODAY
+            day == today.minusDays(1) -> "Yesterday"
+            day.isAfter(today.minusDays(7)) -> day.dayOfWeek.getDisplayName(TextStyle.FULL, Locale.getDefault())
+            else -> day.format(dayFormat)
+        }
+        heading to group
+    }
+    return (if (pinned.isEmpty()) emptyList() else listOf("Pinned" to pinned)) + days
+}
+
+/** "Just now" and "12m ago" within the hour, then the time of day. */
+private fun relativeTime(time: Long): String {
     val minutes = (System.currentTimeMillis() - time).coerceAtLeast(0) / 60_000
     return when {
         minutes < 1 -> "Just now"
         minutes < 60 -> "${minutes}m ago"
-        minutes < 24 * 60 -> "${minutes / 60}h ago"
+        minutes < 24 * 60 -> timeOfDay(time)
         else -> DateFormat.getDateInstance(DateFormat.SHORT).format(Date(time))
     }
+}
+
+private fun timeOfDay(time: Long): String = DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(time))
+
+private fun fullTime(time: Long): String {
+    val day = Instant.ofEpochMilli(time).atZone(ZoneId.systemDefault()).toLocalDate()
+    return if (day == LocalDate.now()) timeOfDay(time) else DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(time))
 }
 
 private suspend fun imageUri(context: Context, clip: Clip): Uri = withContext(Dispatchers.IO) {

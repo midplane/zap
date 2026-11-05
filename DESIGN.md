@@ -62,7 +62,7 @@ Only the Mac panel, Mac thumbnails, and Android search have custom corner radii,
 - **History rows:** three-line text excerpts with source and relative date. Mac supports native selection, a combined accessibility element, pending-sync labels, and a Copy/Preview/Delete context menu. Android opens preview on row tap and exposes a separate labeled Copy action.
 - **Preview:** Mac uses a sheet with selectable text, Done, and Copy. Android uses a bottom sheet with selectable text and Copy, Share, and Delete actions.
 - **Keyboard and navigation:** Mac shows arrow-key navigation, Space preview, and Return paste hints; double-click also pastes. Sheets use native default and cancel actions. Android Settings supports both toolbar Back and system Back.
-- **Identity and settings:** Android's app bar combines a 44 dp brand mark, semibold app name, and a small Clipboard history subtitle. Sync, pairing, and disconnect use full-width native settings rows with leading icons and supporting descriptions. Mac pairing opens a separate compact sheet; settings remain 560 × 570 pt.
+- **Identity and settings:** Android's app bar combines a 40 dp brand mark and the semibold app name; the search field below names the content, so there is no subtitle. Sync, pairing, and disconnect use full-width native settings rows with leading icons and supporting descriptions. Mac pairing opens a separate compact sheet; settings remain 560 × 570 pt.
 - **Feedback:** distinguish first capture, empty search, pending sync, and errors. Mac uses a persistent status footer and dismissible inline errors; Android uses snackbars for actions and errors. Destructive history clearing and disconnecting use native confirmations.
 
 ## Do's and Don'ts

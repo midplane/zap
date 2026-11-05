@@ -55,11 +55,15 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
     }
 }
 
-data class Clip(val id: String, val createdAt: Long, val payload: JSONObject, val pending: Boolean) {
+data class Clip(val id: String, val createdAt: Long, val payload: JSONObject, val pending: Boolean, val pinned: Boolean = false) {
     val kind: String get() = payload.getString("kind")
     val text: String get() = payload.optString("text")
     val source: String get() = payload.optString("source", "Android")
+    /** The text when it is a single web link, for an Open action. */
+    val link: String? get() = text.trim().takeIf { kind == "text" && LINK.matches(it) }
 }
+
+private val LINK = Regex("https?://\\S+", RegexOption.IGNORE_CASE)
 
 class ApiException(val status: Int, override val message: String) : Exception(message)
 
@@ -76,7 +80,10 @@ private fun JSONArray.objects() = (0 until length()).map { getJSONObject(it) }
 
 class Repository(private val context: Context) {
     val identity = Identity(context)
-    private val dao = Room.databaseBuilder(context, HistoryDatabase::class.java, "history.sqlite").build().clips()
+    private val dao = Room.databaseBuilder(context, HistoryDatabase::class.java, "history.sqlite")
+        .addMigrations(HistoryDatabase.ADD_PINS)
+        .build()
+        .clips()
     private val payloads = PayloadFiles(File(context.filesDir, "content").apply { mkdirs() }, identity.localKey)
     private val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
     private val http = OkHttpClient.Builder()
@@ -130,11 +137,12 @@ class Repository(private val context: Context) {
         val cutoff = now - days.value * DAY_MS
         val stored = dao.all()
         val readable = payloads.readAll(stored.map { it.id }.toSet())
-        // Damaged records outlive retention so they can still be recovered.
-        for (clip in stored.filter { it.createdAt <= cutoff && it.id !in payloads.damaged }) removeLocal(clip.id)
+        // Damaged records outlive retention so they can still be recovered. Pinned items are kept until unpinned.
+        val expired = { clip: StoredClip -> clip.createdAt <= cutoff && !clip.pinned }
+        for (clip in stored.filter { expired(it) && it.id !in payloads.damaged }) removeLocal(clip.id)
         clips.value = stored
-            .filter { it.createdAt > cutoff }
-            .mapNotNull { record -> readable[record.id]?.let { Clip(record.id, record.createdAt, it, record.pending) } }
+            .filterNot(expired)
+            .mapNotNull { record -> readable[record.id]?.let { Clip(record.id, record.createdAt, it, record.pending, record.pinned) } }
         damagedCount.value = payloads.damaged.size
         val unreadable = (payloads.damaged + unavailableIds).size
         recovery.value = if (unreadable == 0) {
@@ -146,7 +154,7 @@ class Repository(private val context: Context) {
 
     private suspend fun save(clip: Clip) {
         payloads.save(clip.id, clip.payload)
-        dao.save(StoredClip(clip.id, clip.createdAt, clip.pending))
+        dao.save(StoredClip(clip.id, clip.createdAt, clip.pending, clip.pinned))
     }
 
     private suspend fun removeLocal(id: String) {
@@ -206,6 +214,15 @@ class Repository(private val context: Context) {
         mutex.withLock {
             if (identity.connected) dao.queue(Deletion(clip.id))
             removeLocal(clip.id)
+            refresh()
+        }
+        requestSync()
+    }
+
+    suspend fun setPinned(clip: Clip, pinned: Boolean) = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            // An item that has not been uploaded carries its pin with the upload instead.
+            dao.setPinned(clip.id, pinned, dirty = identity.connected && !clip.pending)
             refresh()
         }
         requestSync()
@@ -387,6 +404,7 @@ class Repository(private val context: Context) {
     private suspend fun forget(message: String?) {
         closeSocket()
         dao.markAllPending()
+        dao.clearPinChanges()
         unavailableIds.clear()
         for (id in dao.deletions()) dao.deleted(id)
         identity.update("url" to "", "token" to "", "deviceId" to "", "keyId" to "", "keys" to JSONObject())
@@ -456,6 +474,15 @@ class Repository(private val context: Context) {
             request("/v1/items/$id", "DELETE")
             dao.deleted(id)
         }
+        for (clip in dao.pinChanges()) {
+            try {
+                request("/v1/items/${clip.id}/pin", "PUT", JSONObject().put("pinned", clip.pinned).bytes())
+            } catch (e: ApiException) {
+                // 404: deleted elsewhere or expired; the next item list settles it.
+                if (e.status != 404) throw e
+            }
+            dao.pinSent(clip.id)
+        }
         if (prefs.getBoolean(PREF_DAYS_PENDING, false)) {
             request("/v1/settings", "PUT", JSONObject().put("days", days.value).bytes())
             prefs.edit().remove(PREF_DAYS_PENDING).commit()
@@ -485,6 +512,7 @@ class Repository(private val context: Context) {
         val remoteIds = items.map { it.getString("id") }.toSet()
         val localIds = clips.value.map { it.id }.toSet()
         for (clip in dao.all().filter { !it.pending && it.id !in remoteIds }) removeLocal(clip.id)
+        for (item in items.filter { it.getString("id") in localIds }) dao.pinnedOnServer(item.getString("id"), item.optBoolean("pinned"))
         // Each download is a round trip, so fetch several at once and show each batch as it lands.
         for (batch in items.filter { it.getString("id") !in localIds }.chunked(DOWNLOAD_BATCH)) {
             val results = coroutineScope {
@@ -514,14 +542,14 @@ class Repository(private val context: Context) {
         val raw = Crypto.open(request("/v1/items/$id"), identity.key(item.getString("keyId")), id)
         val payload = JSONObject(String(raw))
         require(payload.getLong("createdAt") == item.getLong("createdAt")) { "Content metadata did not match" }
-        return Clip(id, item.getLong("createdAt"), payload, pending = false)
+        return Clip(id, item.getLong("createdAt"), payload, pending = false, pinned = item.optBoolean("pinned"))
     }
 
     private suspend fun uploadPending() {
         for (clip in clips.value.filter { it.pending }) {
             val keyId = identity.value("keyId")
             val encrypted = Crypto.seal(clip.payload.bytes(), identity.key(keyId), clip.id)
-            val headers = mapOf("X-Key-Id" to keyId, "X-Created-At" to clip.createdAt.toString())
+            val headers = mapOf("X-Key-Id" to keyId, "X-Created-At" to clip.createdAt.toString(), "X-Pinned" to if (clip.pinned) "1" else "0")
             try {
                 request("/v1/items/${clip.id}", "PUT", encrypted, headers)
                 dao.sent(clip.id)

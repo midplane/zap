@@ -112,22 +112,34 @@ struct HistoryView: View {
     private var clipList: some View {
         ScrollViewReader { proxy in
             List(selection: $model.selection) {
-                ForEach(model.filtered) { clip in
-                    ClipRow(clip: clip, selected: model.selection == clip.id)
-                        .tag(clip.id)
-                        .contextMenu {
-                            Button("Copy") { model.copy(clip) }
-                            Button("Preview") { model.preview = clip }
-                            Divider()
-                            Button("Delete", role: .destructive) { model.delete(clip) }
-                        }
-                        .onTapGesture(count: 2) { model.copy(clip, andPaste: true) }
+                let pinned = model.filtered.filter(\.pinned)
+                let recent = model.filtered.filter { !$0.pinned }
+                if pinned.isEmpty {
+                    rows(recent)
+                } else {
+                    Section("Pinned") { rows(pinned) }
+                    if !recent.isEmpty { Section("Recent") { rows(recent) } }
                 }
             }
             .listStyle(.inset)
             .onChange(of: model.selection) { _, id in
                 if let id { proxy.scrollTo(id) }
             }
+        }
+    }
+
+    private func rows(_ clips: [Clip]) -> some View {
+        ForEach(clips) { clip in
+            ClipRow(clip: clip, selected: model.selection == clip.id, onTogglePin: { model.togglePin(clip) })
+                .tag(clip.id)
+                .contextMenu {
+                    Button("Copy") { model.copy(clip) }
+                    Button("Preview") { model.preview = clip }
+                    Button(clip.pinned ? "Unpin" : "Pin") { model.togglePin(clip) }
+                    Divider()
+                    Button("Delete", role: .destructive) { model.delete(clip) }
+                }
+                .onTapGesture(count: 2) { model.copy(clip, andPaste: true) }
         }
     }
 
@@ -156,7 +168,7 @@ struct HistoryView: View {
                 Button("Some items need recovery") { model.settingsOpen = true }
             }
             Spacer()
-            Text("↑↓ navigate    Space preview    ↵ paste").foregroundStyle(Color.zapSecondary)
+            Text("↑↓ navigate    Space preview    ⌘P pin    ↵ paste").foregroundStyle(Color.zapSecondary)
         }
         .font(.caption)
         .foregroundStyle(Color.zapSecondary)
@@ -168,12 +180,17 @@ struct HistoryView: View {
 struct ClipRow: View {
     let clip: Clip
     var selected = false
+    var onTogglePin: () -> Void = {}
+    @State private var hovering = false
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            thumbnail
-                .frame(width: 44, height: 44)
-                .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
+            // Only images get a leading thumbnail; text starts at the edge.
+            if clip.payload.kind == "image" {
+                thumbnail
+                    .frame(width: 44, height: 44)
+                    .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
+            }
             VStack(alignment: .leading, spacing: 5) {
                 Text(clip.payload.kind == "image" ? "Image" : clip.payload.text ?? "")
                     .font(.body)
@@ -190,16 +207,28 @@ struct ClipRow: View {
                 .font(.caption)
                 .foregroundStyle(selected ? Color.primary : Color.zapSecondary)
             }
+            // Visible on pinned rows, and on hover or selection so pinning can be found without the menu.
+            Button(action: onTogglePin) {
+                Image(systemName: clip.pinned ? "pin.fill" : "pin")
+                    .foregroundStyle(clip.pinned ? Color.accentColor : Color.zapSecondary)
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.borderless)
+            .help(clip.pinned ? "Unpin (⌘P)" : "Pin: keep until you unpin it (⌘P)")
+            .accessibilityLabel(clip.pinned ? "Unpin" : "Pin")
+            .opacity(clip.pinned || hovering || selected ? 1 : 0)
         }
         .padding(.vertical, 8)
-        .accessibilityElement(children: .combine)
+        .onHover { hovering = $0 }
+        .accessibilityElement(children: .contain)
     }
 
     @ViewBuilder private var thumbnail: some View {
-        if clip.payload.kind == "image", let image = clipImage(clip) {
+        if let image = clipImage(clip) {
             Image(nsImage: image).resizable().aspectRatio(contentMode: .fit)
         } else {
-            Image(systemName: "text.alignleft").font(.title3).foregroundStyle(Color.zapSecondary)
+            Image(systemName: "photo").font(.title3).foregroundStyle(Color.zapSecondary)
         }
     }
 }
@@ -231,7 +260,8 @@ struct PreviewView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
-                Text(clip.payload.kind == "image" ? "Image" : "Text").font(.headline)
+                Text("\(clip.payload.source) · \(clip.date.formatted(date: Calendar.current.isDateInToday(clip.date) ? .omitted : .abbreviated, time: .shortened))")
+                    .font(.headline)
                 Spacer()
                 Button("Done") { dismiss() }.keyboardShortcut(.cancelAction)
             }
@@ -243,7 +273,9 @@ struct PreviewView: View {
                 }
             }
             HStack {
-                Text(clip.date.formatted()).font(.caption).foregroundStyle(Color.zapSecondary)
+                Button(clip.pinned ? "Unpin" : "Pin") { model.togglePin(clip) }
+                    .keyboardShortcut("p", modifiers: .command)
+                    .help(clip.pinned ? "Unpin: return to normal retention" : "Pin: keep until you unpin it")
                 Spacer()
                 Button("Copy") {
                     model.copy(clip)
@@ -369,11 +401,15 @@ struct SettingsView: View {
         ForEach(model.devices) { device in
             let isThisMac = device.id == model.identity.deviceId
             HStack {
-                Label(device.name, systemImage: isThisMac ? "desktopcomputer" : "laptopcomputer.and.iphone").lineLimit(1)
+                Label(device.name, systemImage: isThisMac || device.platform == "mac" ? "laptopcomputer" : device.platform == "android" ? "iphone" : "laptopcomputer.and.iphone").lineLimit(1)
                 Spacer()
                 if isThisMac {
                     Text("This Mac").foregroundStyle(Color.zapSecondary).font(.caption)
                 } else {
+                    if let seen = device.lastSeenDate {
+                        Text("Synced \(seen, format: .relative(presentation: .named, unitsStyle: .abbreviated))")
+                            .foregroundStyle(Color.zapSecondary).font(.caption)
+                    }
                     Button("Remove", role: .destructive) { removing = device }
                 }
             }

@@ -6,12 +6,21 @@ struct RemoteItem: Decodable {
     var id: String
     var keyId: String
     var createdAt: Int64
+    var pinned: Bool?
 }
 
 struct RemoteDevice: Decodable, Identifiable {
     var id: String
     var name: String
     var publicKey: String
+    /// Milliseconds since 1970; 0 or absent until the device syncs with an updated server.
+    var lastSeen: Int64?
+    var platform: String?
+
+    var lastSeenDate: Date? {
+        guard let lastSeen, lastSeen > 0 else { return nil }
+        return Date(timeIntervalSince1970: Double(lastSeen) / 1000)
+    }
 }
 
 struct RemoteKey: Decodable {
@@ -140,13 +149,15 @@ private extension Data {
         try reload()
     }
 
+    /// Matching clips, pinned first, each part newest first.
     var filtered: [Clip] {
-        clips.filter { clip in
+        let matches = clips.filter { clip in
             guard filter.includes(clip) else { return false }
             guard !query.isEmpty else { return true }
             return (clip.payload.text ?? "Image").localizedCaseInsensitiveContains(query)
                 || clip.payload.source.localizedCaseInsensitiveContains(query)
         }
+        return matches.filter(\.pinned) + matches.filter { !$0.pinned }
     }
 
     var selected: Clip? { filtered.first(where: { $0.id == selection }) ?? filtered.first }
@@ -248,6 +259,18 @@ private extension Data {
         guard !list.isEmpty else { return }
         let index = list.firstIndex(where: { $0.id == selection }) ?? 0
         selection = list[max(0, min(list.count - 1, index + delta))].id
+    }
+
+    func togglePin(_ clip: Clip) {
+        do {
+            // A clip that has not been uploaded carries its pin with the upload instead.
+            try store.setPinned(clip.id, !clip.pinned, dirty: connected && !clip.pending)
+            try reload()
+            if preview?.id == clip.id { preview = clips.first { $0.id == clip.id } }
+            Task { await sync() }
+        } catch {
+            self.error = error.localizedDescription
+        }
     }
 
     func delete(_ clip: Clip) {
@@ -545,6 +568,14 @@ private extension Data {
             _ = try await request("/v1/items/\(id)", method: "DELETE")
             try store.deleted(id)
         }
+        for change in try store.pinChanges() {
+            do {
+                _ = try await request("/v1/items/\(change.id)/pin", method: "PUT", body: json(["pinned": change.pinned]))
+            } catch let error as APIError where error.status == 404 {
+                // Deleted elsewhere or expired; the next item list settles it.
+            }
+            try store.pinSent(change.id)
+        }
         if defaults.bool(forKey: DefaultsKey.daysPending) {
             let requestedDays = days
             _ = try await request("/v1/settings", method: "PUT", body: json(["days": requestedDays]))
@@ -578,6 +609,7 @@ private extension Data {
             try store.remove(record.id)
         }
         let localIDs = Set(clips.map(\.id))
+        for item in items where localIDs.contains(item.id) { try store.pinnedOnServer(item.id, item.pinned ?? false) }
         let deleted = Set(try store.deletions())
         for item in items where !localIDs.contains(item.id) && !deleted.contains(item.id) {
             do {
@@ -603,7 +635,7 @@ private extension Data {
         guard payload.createdAt == item.createdAt else { throw ZapError("Content metadata did not match.") }
         // The item may have been deleted here while it downloaded.
         if !(try store.deletions()).contains(item.id) {
-            try store.save(Clip(id: item.id, payload: payload, pending: false))
+            try store.save(Clip(id: item.id, payload: payload, pending: false, pinned: item.pinned ?? false))
         }
     }
 
@@ -614,6 +646,7 @@ private extension Data {
                 "Content-Type": "application/octet-stream",
                 "X-Key-Id": identity.keyId,
                 "X-Created-At": String(clip.payload.createdAt),
+                "X-Pinned": clip.pinned ? "1" : "0",
             ]
             do {
                 _ = try await request("/v1/items/\(clip.id)", method: "PUT", body: encrypted, headers: headers)

@@ -21,6 +21,7 @@ struct Clip: Identifiable {
     var id: String
     var payload: Payload
     var pending: Bool
+    var pinned = false
     var date: Date { Date(timeIntervalSince1970: Double(payload.createdAt) / 1000) }
 }
 
@@ -66,6 +67,10 @@ final class Store {
         try execute("PRAGMA journal_mode=WAL")
         try execute("CREATE TABLE IF NOT EXISTS clips(id TEXT PRIMARY KEY, created INTEGER, payload TEXT, pending INTEGER)")
         try execute("CREATE TABLE IF NOT EXISTS deletions(id TEXT PRIMARY KEY)")
+        // Columns added after the first release. `pinDirty` marks a pin change the server has not received.
+        let columns = Set(try rows("PRAGMA table_info(clips)").map { $0[1] })
+        if !columns.contains("pinned") { try execute("ALTER TABLE clips ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0") }
+        if !columns.contains("pinDirty") { try execute("ALTER TABLE clips ADD COLUMN pinDirty INTEGER NOT NULL DEFAULT 0") }
     }
 
     deinit { sqlite3_close(db) }
@@ -75,14 +80,14 @@ final class Store {
     }
 
     func all() throws -> [Clip] {
-        let records = try rows("SELECT id,pending FROM clips ORDER BY created DESC")
+        let records = try rows("SELECT id,pending,pinned FROM clips ORDER BY created DESC")
         let ids = Set(records.map { $0[0] })
         cached = cached.filter { ids.contains($0.key) }
         damagedIDs = []
         return records.compactMap { row in
             let id = row[0]
             do {
-                return Clip(id: id, payload: try payload(id), pending: row[1] == "1")
+                return Clip(id: id, payload: try payload(id), pending: row[1] == "1", pinned: row[2] == "1")
             } catch {
                 // Quarantine in place: preserve the original encrypted row for repair or explicit removal.
                 damagedIDs.insert(id)
@@ -106,8 +111,8 @@ final class Store {
         try clip.payload.validate()
         let encrypted = try VaultCrypto.seal(JSONEncoder().encode(clip.payload), key: localKey, aad: clip.id)
         try execute(
-            "INSERT OR REPLACE INTO clips VALUES(?,?,?,?)",
-            [clip.id, String(clip.payload.createdAt), encrypted.base64EncodedString(), clip.pending ? "1" : "0"]
+            "INSERT OR REPLACE INTO clips(id,created,payload,pending,pinned) VALUES(?,?,?,?,?)",
+            [clip.id, String(clip.payload.createdAt), encrypted.base64EncodedString(), clip.pending ? "1" : "0", clip.pinned ? "1" : "0"]
         )
         cached[clip.id] = clip.payload
         damagedIDs.remove(clip.id)
@@ -118,7 +123,24 @@ final class Store {
     }
 
     func markAllPending() throws {
-        try execute("UPDATE clips SET pending=1")
+        try execute("UPDATE clips SET pending=1, pinDirty=0")
+    }
+
+    func setPinned(_ id: String, _ pinned: Bool, dirty: Bool) throws {
+        try execute("UPDATE clips SET pinned=?, pinDirty=? WHERE id=?", [pinned ? "1" : "0", dirty ? "1" : "0", id])
+    }
+
+    /// Applies the server's pin unless a local change is still on its way.
+    func pinnedOnServer(_ id: String, _ pinned: Bool) throws {
+        try execute("UPDATE clips SET pinned=? WHERE id=? AND pinDirty=0", [pinned ? "1" : "0", id])
+    }
+
+    func pinChanges() throws -> [(id: String, pinned: Bool)] {
+        try rows("SELECT id,pinned FROM clips WHERE pinDirty=1").map { ($0[0], $0[1] == "1") }
+    }
+
+    func pinSent(_ id: String) throws {
+        try execute("UPDATE clips SET pinDirty=0 WHERE id=?", [id])
     }
 
     /// Deletes a clip. With `queue`, also records the deletion for the next sync to send.
@@ -138,11 +160,11 @@ final class Store {
         try execute("DELETE FROM deletions WHERE id=?", [id])
     }
 
-    /// Removes clips older than the retention window. Damaged rows stay for recovery.
+    /// Removes clips older than the retention window. Damaged rows stay for recovery; pinned clips stay until unpinned.
     func expire(days: Int) throws {
         _ = try all()
         let cutoff = Int64(Date().timeIntervalSince1970 * 1000) - Int64(days) * 86_400_000
-        for row in try rows("SELECT id FROM clips WHERE created<?", [String(cutoff)]) where !damagedIDs.contains(row[0]) {
+        for row in try rows("SELECT id FROM clips WHERE created<? AND pinned=0", [String(cutoff)]) where !damagedIDs.contains(row[0]) {
             try remove(row[0])
         }
     }
