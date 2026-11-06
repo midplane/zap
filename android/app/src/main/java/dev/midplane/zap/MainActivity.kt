@@ -50,6 +50,11 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
@@ -172,6 +177,8 @@ fun ZapScreen(
     var previewId by remember { mutableStateOf<String?>(null) }
     // Deleted items stay hidden while their Undo is offered, and are deleted when it expires.
     var undoableDeletes by remember { mutableStateOf(emptySet<String>()) }
+    // Rubber stamps waiting to land on a sheet, by item id.
+    val stamps = remember { mutableStateMapOf<String, String>() }
     var pairingCode by remember { mutableStateOf<String?>(null) }
     var enteringCode by remember { mutableStateOf(false) }
     var pairingBusy by remember { mutableStateOf(false) }
@@ -191,6 +198,7 @@ fun ZapScreen(
 
     fun copy(clip: Clip) = runAction {
         copyClip(context, clip)
+        stamps[clip.id] = "COPIED"
         // Android 13 and later confirm every copy with their own clipboard preview.
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) snackbar.showSnackbar("Copied")
     }
@@ -243,6 +251,8 @@ fun ZapScreen(
         floatingActionButton = {
             if (!showSettings) {
                 ExtendedFloatingActionButton(
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
                     onClick = {
                         val clipboard = context.getSystemService(ClipboardManager::class.java)
                         val item = clipboard.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)
@@ -279,7 +289,9 @@ fun ZapScreen(
                     onFilterChange = { filter = it },
                     onOpenSettings = { showSettings = true },
                     onPreview = { previewId = it.id },
-                    onCopy = ::copy
+                    onCopy = ::copy,
+                    stamps = stamps,
+                    onStampShown = { stamps.remove(it) }
                 )
             }
         }
@@ -300,7 +312,12 @@ fun ZapScreen(
                     repository.error.value = "No app on this phone can open that link."
                 }
             },
-            onPin = { runAction { repository.setPinned(clip, !clip.pinned) } },
+            onPin = {
+                runAction {
+                    repository.setPinned(clip, !clip.pinned)
+                    if (!clip.pinned) stamps[clip.id] = "PINNED"
+                }
+            },
             onShare = { runAction { shareClip(context, clip) } },
             onDelete = { delete(clip) }
         )
@@ -388,7 +405,9 @@ private fun HistoryContent(
     onFilterChange: (ContentFilter) -> Unit,
     onOpenSettings: () -> Unit,
     onPreview: (Clip) -> Unit,
-    onCopy: (Clip) -> Unit
+    onCopy: (Clip) -> Unit,
+    stamps: Map<String, String>,
+    onStampShown: (String) -> Unit
 ) {
     val clips by repository.clips.collectAsStateWithLifecycle()
     val status by repository.status.collectAsStateWithLifecycle()
@@ -398,10 +417,11 @@ private fun HistoryContent(
     val scope = rememberCoroutineScope()
 
     Column(Modifier.widthIn(max = 760.dp).fillMaxSize()) {
-        OutlinedTextField(
+        // Search is written on a ruled line, not boxed in a field.
+        TextField(
             search,
             onSearchChange,
-            Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp),
             placeholder = { Text("Search history") },
             leadingIcon = { Icon(Icons.Outlined.Search, null) },
             trailingIcon = {
@@ -410,7 +430,13 @@ private fun HistoryContent(
                 }
             },
             singleLine = true,
-            shape = RoundedCornerShape(16.dp)
+            textStyle = MaterialTheme.typography.titleMedium,
+            colors = TextFieldDefaults.colors(
+                focusedContainerColor = Color.Transparent,
+                unfocusedContainerColor = Color.Transparent,
+                focusedIndicatorColor = MaterialTheme.colorScheme.primary,
+                unfocusedIndicatorColor = LocalSheetColors.current.ruling
+            )
         )
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
@@ -470,14 +496,21 @@ private fun HistoryContent(
                 // Bottom padding keeps the last item clear of the floating button.
                 LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 100.dp)) {
                     for ((heading, group) in groups) {
-                        stickyHeader(key = "heading:$heading") { DayHeading(heading) }
+                        stickyHeader(key = "heading:$heading") { PageHeading(heading, group.size) }
                         items(group, key = { it.id }) { clip ->
-                            ClipListItem(
+                            SheetRow(
                                 clip,
-                                time = if (heading == TODAY) relativeTime(clip.createdAt) else timeOfDay(clip.createdAt),
+                                time = stubTime(clip.createdAt),
+                                stamp = stamps[clip.id],
+                                onStampShown = { onStampShown(clip.id) },
                                 onCopy = { onCopy(clip) },
                                 onPreview = { onPreview(clip) },
-                                modifier = Modifier.animateItem()
+                                image = { ClipImage(clip, it) },
+                                modifier = Modifier.animateItem(
+                                    fadeInSpec = tween(220),
+                                    placementSpec = spring(dampingRatio = 0.85f, stiffness = 500f),
+                                    fadeOutSpec = tween(160)
+                                )
                             )
                         }
                     }
@@ -485,16 +518,6 @@ private fun HistoryContent(
             }
         }
     }
-}
-
-@Composable
-private fun DayHeading(text: String) {
-    Text(
-        text,
-        Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface).padding(start = 20.dp, end = 20.dp, top = 16.dp, bottom = 4.dp),
-        style = MaterialTheme.typography.titleSmall,
-        color = MaterialTheme.colorScheme.primary
-    )
 }
 
 @Composable
@@ -512,12 +535,15 @@ private fun EmptyHistory(searching: Boolean, filter: ContentFilter, connected: B
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Spacer(Modifier.height(48.dp))
-        Icon(
-            if (searching) Icons.Outlined.Search else Icons.Outlined.ContentPaste,
-            null,
-            Modifier.size(40.dp),
-            tint = MaterialTheme.colorScheme.onSurfaceVariant
-        )
+        if (searching) {
+            Icon(Icons.Outlined.Search, null, Modifier.size(40.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        } else {
+            Image(
+                painterResource(R.drawable.ic_zap_foreground),
+                null,
+                Modifier.size(72.dp).background(colorResource(R.color.zap_icon_background), RoundedCornerShape(20.dp))
+            )
+        }
         Spacer(Modifier.height(20.dp))
         Text(title, style = MaterialTheme.typography.titleLarge, textAlign = TextAlign.Center)
         Spacer(Modifier.height(8.dp))
@@ -527,29 +553,6 @@ private fun EmptyHistory(searching: Boolean, filter: ContentFilter, connected: B
             TextButton(onClick = onConnect) { Text("Connect your Mac") }
         }
     }
-}
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun ClipListItem(clip: Clip, time: String, onCopy: () -> Unit, onPreview: () -> Unit, modifier: Modifier = Modifier) {
-    val isImage = clip.kind == "image"
-    ListItem(
-        headlineContent = { Text(if (isImage) "Image" else clip.text.trim(), maxLines = 3, overflow = TextOverflow.Ellipsis) },
-        supportingContent = { Text("${clip.source} · $time", maxLines = 1, overflow = TextOverflow.Ellipsis) },
-        // Only images get a leading element; text starts at the edge.
-        leadingContent = if (isImage) ({ ClipImage(clip, Modifier.size(48.dp)) }) else null,
-        trailingContent = {
-            IconButton(onClick = onPreview) { Icon(Icons.Outlined.OpenInFull, "Preview") }
-        },
-        modifier = modifier
-            .combinedClickable(
-                onClickLabel = if (isImage) "Copy image" else "Copy text",
-                onLongClickLabel = "Preview",
-                onLongClick = onPreview,
-                onClick = onCopy
-            )
-            .padding(horizontal = 4.dp)
-    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -567,13 +570,26 @@ private fun PreviewSheet(
     val link = clip.link
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(Modifier.fillMaxWidth().padding(24.dp).navigationBarsPadding(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            Text("${clip.source} · ${fullTime(clip.createdAt)}", style = MaterialTheme.typography.titleMedium)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("№${clip.serial}", style = SerialStyle.copy(fontSize = 13.sp), color = LocalSheetColors.current.serial)
+                Text(
+                    "${clip.source} · ${fullTime(clip.createdAt)}",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
             LazyColumn(Modifier.heightIn(max = 360.dp)) {
                 item {
                     if (isImage) {
-                        ClipImage(clip, Modifier.fillMaxWidth())
+                        ClipImage(clip, Modifier.fillMaxWidth().clip(MaterialTheme.shapes.medium))
                     } else {
-                        SelectionContainer { Text(clip.text, style = MaterialTheme.typography.bodyLarge) }
+                        val style = MaterialTheme.typography.bodyLarge.let {
+                            if (clip.sheetKind == SheetKind.CODE) it.copy(fontFamily = FontFamily.Monospace) else it
+                        }
+                        // The original sheet: the full text on ruled paper.
+                        SelectionContainer { Text(clip.text, Modifier.fillMaxWidth().ruled(style.lineHeight), style = style) }
                     }
                 }
             }
@@ -662,26 +678,26 @@ private fun SettingsContent(
     var confirmingDisconnect by remember { mutableStateOf(false) }
     var invitation by remember { mutableStateOf<String?>(null) }
     var removingDevice by remember { mutableStateOf<JSONObject?>(null) }
+    var showingLicenses by remember { mutableStateOf(false) }
     val context = LocalContext.current
 
     LazyColumn(
         Modifier.widthIn(max = 680.dp).fillMaxSize(),
-        contentPadding = PaddingValues(24.dp),
-        verticalArrangement = Arrangement.spacedBy(20.dp)
+        contentPadding = PaddingValues(start = 24.dp, end = 24.dp, bottom = 32.dp)
     ) {
+        item { SectionHeading("History") }
         item {
-            Text("History", style = MaterialTheme.typography.titleMedium)
-            Spacer(Modifier.height(4.dp))
             Box {
                 ListItem(
                     headlineContent = { Text("Keep history for") },
                     supportingContent = { Text("Pinned items are kept until you unpin them.") },
                     trailingContent = {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(daysLabel(days), style = MaterialTheme.typography.labelLarge)
-                            Icon(Icons.Outlined.ArrowDropDown, null)
+                            Text(daysLabel(days), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                            Icon(Icons.Outlined.ArrowDropDown, null, tint = MaterialTheme.colorScheme.primary)
                         }
                     },
+                    colors = ListItemDefaults.colors(containerColor = Color.Transparent),
                     modifier = Modifier.clickable(role = Role.DropdownList) { choosingRetention = true }
                 )
                 DropdownMenu(choosingRetention, onDismissRequest = { choosingRetention = false }, offset = DpOffset(200.dp, 0.dp)) {
@@ -703,53 +719,58 @@ private fun SettingsContent(
                 }
             }
             recovery?.let {
-                Text(it, style = MaterialTheme.typography.bodySmall)
-                TextButton(onClick = { onAction { repository.sync() } }) { Text("Retry recovery") }
-                if (damagedCount > 0) {
-                    TextButton(onClick = { confirmingDiscard = true }) { Text("Discard damaged items", color = MaterialTheme.colorScheme.error) }
+                Column(Modifier.padding(horizontal = 16.dp)) {
+                    Text(it, style = MaterialTheme.typography.bodySmall)
+                    TextButton(onClick = { onAction { repository.sync() } }) { Text("Retry recovery") }
+                    if (damagedCount > 0) {
+                        TextButton(onClick = { confirmingDiscard = true }) { Text("Discard damaged items", color = MaterialTheme.colorScheme.error) }
+                    }
                 }
             }
         }
-        item { HorizontalDivider() }
-        item {
-            Text(if (connected) "Devices" else "Connect your Mac", style = MaterialTheme.typography.titleMedium)
-            Spacer(Modifier.height(12.dp))
-            if (connected) {
-                Text(server, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text(status, style = MaterialTheme.typography.labelMedium)
-            } else {
-                Text(
-                    "In Zap on Mac, open Settings and choose Pair another device. Your content is encrypted before it leaves either device.",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(Modifier.height(16.dp))
-                Button(onClick = onScan) {
-                    Icon(Icons.Outlined.QrCodeScanner, null)
-                    Spacer(Modifier.width(8.dp))
-                    Text("Scan pairing code")
-                }
-                TextButton(onClick = onEnterCode) { Text("Enter pairing code") }
-            }
-        }
-        items(devices, key = { it.getString("id") }) { device ->
-            val isThis = device.getString("id") == thisDeviceId
-            DeviceRow(device, isThis, onRemove = { removingDevice = device })
-        }
+
         if (connected) {
+            item { SectionHeading("Devices", devices.size) }
+            item { ServerLine(server, status) }
             item {
+                // One stack, sheets separated by perforations, like the history list.
                 Column {
-                    SettingsAction("Pair another device", "Create a private code for your Mac or phone", Icons.Outlined.QrCodeScanner) {
-                        onAction { invitation = repository.invite() }
-                    }
-                    HorizontalDivider()
-                    SettingsAction("Sync now", "Send pending items and check for new history", Icons.Outlined.Sync) {
-                        onAction { repository.sync() }
+                    devices.forEachIndexed { index, device ->
+                        DeviceRow(
+                            device,
+                            isThis = device.getString("id") == thisDeviceId,
+                            onRemove = { removingDevice = device },
+                            modifier = if (index < devices.lastIndex) Modifier.perforation(LocalSheetColors.current.ruling) else Modifier
+                        )
                     }
                 }
             }
+            item {
+                SettingsAction("Pair another device", "Create a private code for your Mac or phone", Icons.Outlined.QrCodeScanner) {
+                    onAction { invitation = repository.invite() }
+                }
+            }
+        } else {
+            item { SectionHeading("Connect your Mac") }
+            item {
+                Column(Modifier.padding(horizontal = 16.dp)) {
+                    Text(
+                        "In Zap on Mac, open Settings and choose Pair another device. Your content is encrypted before it leaves either device.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(16.dp))
+                    Button(onClick = onScan) {
+                        Icon(Icons.Outlined.QrCodeScanner, null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Scan pairing code")
+                    }
+                    TextButton(onClick = onEnterCode) { Text("Enter pairing code") }
+                }
+            }
         }
+
         // Actions that remove history or this phone's connection stay apart from everyday settings.
-        item { HorizontalDivider() }
+        item { Spacer(Modifier.height(16.dp)); HorizontalDivider(color = LocalSheetColors.current.ruling) }
         item {
             Column {
                 if (connected) {
@@ -765,7 +786,20 @@ private fun SettingsContent(
                 ) { confirmingClear = true }
             }
         }
+        item {
+            Row(
+                Modifier.fillMaxWidth().padding(top = 24.dp),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Zap ${BuildConfig.VERSION_NAME}", style = SerialStyle, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("  ·  ", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                TextButton(onClick = { showingLicenses = true }) { Text("Open-source licenses") }
+            }
+        }
     }
+
+    if (showingLicenses) LicensesDialog(onDismiss = { showingLicenses = false })
 
     shorterRetention?.let { choice ->
         ConfirmDialog(
@@ -846,7 +880,7 @@ private fun SettingsContent(
 }
 
 @Composable
-private fun DeviceRow(device: JSONObject, isThis: Boolean, onRemove: () -> Unit) {
+private fun DeviceRow(device: JSONObject, isThis: Boolean, onRemove: () -> Unit, modifier: Modifier = Modifier) {
     val platform = if (isThis) "android" else device.optString("platform")
     val lastSeen = device.optLong("lastSeen")
     ListItem(
@@ -872,8 +906,55 @@ private fun DeviceRow(device: JSONObject, isThis: Boolean, onRemove: () -> Unit)
             )
         },
         trailingContent = {
-            if (!isThis) TextButton(onClick = onRemove) { Text("Remove", color = MaterialTheme.colorScheme.error) }
+            // Quiet here; the confirmation explains the key change.
+            if (!isThis) TextButton(onClick = onRemove) { Text("Remove", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        },
+        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+        modifier = modifier
+    )
+}
+
+/** The server and how this phone stands with it, as one line. */
+@Composable
+private fun ServerLine(server: String, status: String) {
+    val sheet = LocalSheetColors.current
+    val dot = when {
+        status == "Up to date" -> MaterialTheme.colorScheme.primary
+        status.startsWith("Offline") -> sheet.serial
+        else -> MaterialTheme.colorScheme.outline
+    }
+    Row(Modifier.padding(horizontal = 16.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Box(Modifier.size(6.dp).background(dot, androidx.compose.foundation.shape.CircleShape))
+        Text(
+            "${Uri.parse(server).host ?: server} · $status",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+@Composable
+private fun LicensesDialog(onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val text by produceState("") {
+        value = withContext(Dispatchers.IO) {
+            val assets = context.assets
+            (assets.list("licenses") ?: emptyArray()).sorted().joinToString("\n\n") { name ->
+                "— $name —\n\n" + assets.open("licenses/$name").bufferedReader().use { it.readText() }
+            }
         }
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Open-source licenses") },
+        text = {
+            LazyColumn(Modifier.heightIn(max = 480.dp)) {
+                item { Text(text, style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace)) }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } }
     )
 }
 
@@ -926,6 +1007,16 @@ private fun copyPairingCode(context: Context, code: String) {
 }
 
 private const val TODAY = "Today"
+
+/** Short enough for a stub: "now", "12m", then the time of day. */
+private fun stubTime(time: Long): String {
+    val minutes = (System.currentTimeMillis() - time).coerceAtLeast(0) / 60_000
+    return when {
+        minutes < 1 -> "now"
+        minutes < 60 -> "${minutes}m"
+        else -> timeOfDay(time)
+    }
+}
 
 /** History in display order: pinned items first, then one group per day, newest first. */
 private fun groupByDay(clips: List<Clip>): List<Pair<String, List<Clip>>> {

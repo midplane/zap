@@ -6,6 +6,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
+import android.os.Looper
 import android.os.SystemClock
 import androidx.room.Room
 import androidx.work.*
@@ -592,8 +593,11 @@ class Repository(private val context: Context) {
      */
     @Synchronized private fun dropStaleConnections() {
         val now = SystemClock.elapsedRealtime()
-        if (now - lastNetworkUse > STALE_CONNECTION_MS) http.connectionPool.evictAll()
+        val stale = now - lastNetworkUse > STALE_CONNECTION_MS
         lastNetworkUse = now
+        if (!stale) return
+        // Closing a TLS connection writes to the network, which Android forbids on the main thread.
+        if (Looper.myLooper() == Looper.getMainLooper()) scope.launch { http.connectionPool.evictAll() } else http.connectionPool.evictAll()
     }
 
     @Synchronized fun onForegroundChanged(visible: Boolean) {
